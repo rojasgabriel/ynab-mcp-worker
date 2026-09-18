@@ -27,7 +27,7 @@
 	],
 	"vars": {
 		// Start read-only. Set to "true" and redeploy once you trust it.
-		"YNAB_ALLOW_WRITES": "false",
+		"YNAB_ALLOW_WRITES": "true",
 		"YNAB_DEFAULT_BUDGET_ID": "last-used",
 		"SERVER_LABEL": "YNAB MCP"
 	}
