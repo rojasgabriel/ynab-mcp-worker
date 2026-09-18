@@ -22,6 +22,28 @@ interface EnvWithOAuth extends Env {
 export default {
   async fetch(request: Request, env: EnvWithOAuth): Promise<Response> {
     const url = new URL(request.url);
+    const misconfigured = configError(env);
+
+    if (url.pathname === '/healthz') {
+      return Response.json(
+        {
+          status: misconfigured ? 'not_configured' : 'ok',
+          mode: env.YNAB_ALLOW_WRITES === 'true' ? 'read-write' : 'read-only',
+          resource: new URL('/mcp', url.origin).href,
+          ...(misconfigured ? { problem: misconfigured } : {}),
+        },
+        { status: misconfigured ? 503 : 200 },
+      );
+    }
+
+    // Fail closed. An unset AUTH_PASSPHRASE would otherwise be compared against
+    // an empty buffer, which means an empty passphrase would authorize access.
+    if (misconfigured) {
+      return htmlResponse(
+        errorPage(label(env), 'This server is not configured yet.', misconfigured),
+        503,
+      );
+    }
 
     if (url.pathname === '/authorize') {
       return request.method === 'POST'
@@ -29,19 +51,36 @@ export default {
         : handleAuthorize(request, env);
     }
 
-    if (url.pathname === '/healthz') {
-      return Response.json({
-        status: 'ok',
-        mode: env.YNAB_ALLOW_WRITES === 'true' ? 'read-write' : 'read-only',
-        resource: new URL('/mcp', url.origin).href,
-      });
-    }
-
     if (url.pathname === '/') return landingPage(env, url.origin);
 
     return new Response('Not found', { status: 404 });
   },
 };
+
+/**
+ * Refuse to run without the two secrets.
+ *
+ * This is not belt-and-braces: an unset AUTH_PASSPHRASE encodes to an empty
+ * buffer, so the constant-time comparison would succeed for an empty
+ * passphrase and hand out a grant to anyone who found the URL. Missing secrets
+ * must fail closed, loudly, rather than quietly becoming no security at all.
+ */
+export function configError(env: Env): string | null {
+  if (!env.AUTH_PASSPHRASE || env.AUTH_PASSPHRASE.length < 12) {
+    return (
+      'AUTH_PASSPHRASE is not set, or is shorter than 12 characters. Set it with ' +
+      '`npx wrangler secret put AUTH_PASSPHRASE`, or in the Cloudflare dashboard under ' +
+      'your Worker > Settings > Variables and Secrets. It must be added as a Secret, not a plaintext variable.'
+    );
+  }
+  if (!env.YNAB_ACCESS_TOKEN || env.YNAB_ACCESS_TOKEN.length < 10) {
+    return (
+      'YNAB_ACCESS_TOKEN is not set. Set it with `npx wrangler secret put YNAB_ACCESS_TOKEN`, ' +
+      'or in the Cloudflare dashboard under your Worker > Settings > Variables and Secrets.'
+    );
+  }
+  return null;
+}
 
 // ---------------------------------------------------------------- handlers
 

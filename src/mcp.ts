@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { YnabService } from './ynab.js';
 import { registerTools } from './tools.js';
+import { configError } from './consent.js';
 import type { AuthProps, Env } from '../worker-configuration.js';
 
 /**
@@ -25,6 +26,14 @@ export default {
         { jsonrpc: '2.0', error: { code: -32000, message: 'This server is stateless; use POST.' }, id: null },
         405,
         { Allow: 'POST' },
+      );
+    }
+
+    const misconfigured = configError(env);
+    if (misconfigured) {
+      return json(
+        { jsonrpc: '2.0', error: { code: -32603, message: misconfigured }, id: null },
+        503,
       );
     }
 
