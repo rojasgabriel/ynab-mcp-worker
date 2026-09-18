@@ -1,0 +1,15 @@
+node_modules/
+.wrangler/
+dist/
+*.log
+
+# Local secrets. .dev.vars.example is the template; .dev.vars is yours.
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*
+
+.DS_Store
+.idea/
+.vscode/

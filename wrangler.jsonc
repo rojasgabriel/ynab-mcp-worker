@@ -1,0 +1,40 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+
+  // Pick your own name — it becomes part of the URL:
+  //   https://<name>.<your-subdomain>.workers.dev
+  "name": "ynab-mcp",
+
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  // nodejs_compat: the MCP SDK reaches for a few Node built-ins.
+  // global_fetch_strictly_public: required for Client ID Metadata Document
+  //   support, which is the registration path Claude prefers over DCR.
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+
+  "observability": {
+    "enabled": true
+  },
+
+  // The OAuth provider keeps registered clients, grants and tokens here.
+  // Create it once with:
+  //   npx wrangler kv namespace create OAUTH_KV
+  // then paste the returned id below.
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+    }
+  ],
+
+  "vars": {
+    // Start read-only. Set to "true" and redeploy once you trust it.
+    "YNAB_ALLOW_WRITES": "false",
+    "YNAB_DEFAULT_BUDGET_ID": "last-used",
+    "SERVER_LABEL": "YNAB MCP"
+  }
+
+  // Secrets are NOT set here. They go in via:
+  //   npx wrangler secret put YNAB_ACCESS_TOKEN
+  //   npx wrangler secret put AUTH_PASSPHRASE
+}

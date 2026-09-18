@@ -1,0 +1,22 @@
+# Secrets for this Worker, in dotenv format.
+#
+# Two uses:
+#
+#   1. Local development. Copy this file to .dev.vars, fill in the values, and
+#      run `npx wrangler dev`. .dev.vars is gitignored.
+#
+#   2. Deploy to Cloudflare. The one-click deploy flow reads the keys below and
+#      prompts you for each value, then stores them as encrypted secrets.
+#
+# Values are left empty on purpose so a placeholder can never reach production.
+# In a CLI deploy these are set with `npx wrangler secret put <NAME>`.
+
+# Your YNAB Personal Access Token.
+# YNAB > Account Settings > Developer Settings > New Token.
+# Never leaves the Worker; never sent to Claude.
+YNAB_ACCESS_TOKEN=
+
+# The passphrase you type on the consent screen when connecting Claude.
+# This is the only thing protecting your budget from anyone who finds the URL,
+# so make it long and random: openssl rand -base64 24
+AUTH_PASSPHRASE=

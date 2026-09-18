@@ -1,0 +1,46 @@
+# Deploy on push to main.
+#
+# Only needed if you want GitHub to own deploys. If you connected this repo
+# through Workers Builds (Cloudflare dashboard > Workers & Pages > Import a
+# repository), Cloudflare already builds and deploys on push and this workflow
+# is redundant — delete it.
+#
+# Setup:
+#   1. Create a Cloudflare API token with the "Edit Cloudflare Workers"
+#      template at https://dash.cloudflare.com/profile/api-tokens
+#   2. In this repo: Settings > Secrets and variables > Actions, add
+#      CLOUDFLARE_API_TOKEN
+#
+# The two Worker secrets (YNAB_ACCESS_TOKEN, AUTH_PASSPHRASE) are deliberately
+# NOT pushed from here. Set them once with `wrangler secret put`, or in the
+# Cloudflare dashboard under the Worker's Settings > Variables and Secrets.
+# They persist across deploys, so there is no reason to hand them to CI — one
+# fewer place your YNAB token exists.
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy to Cloudflare Workers
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Catch type errors before they reach production rather than after.
+      - run: npm run typecheck
+
+      - uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
