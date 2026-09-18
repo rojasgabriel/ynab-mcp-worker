@@ -111,6 +111,8 @@ async function handleAuthorize(request: Request, env: EnvWithOAuth): Promise<Res
       scopes: negotiateScopes(authRequest.scope, env),
       allowWrites: env.YNAB_ALLOW_WRITES === 'true',
     }),
+    200,
+    redirectOrigin(authRequest),
   );
 }
 
@@ -142,6 +144,7 @@ async function handleConsentSubmit(request: Request, env: EnvWithOAuth): Promise
         error: 'That passphrase is not correct.',
       }),
       401,
+      redirectOrigin(authRequest),
     );
   }
 
@@ -228,14 +231,32 @@ async function passphraseMatches(candidate: string, expected: string): Promise<b
   return diff === 0;
 }
 
-function htmlResponse(body: string, status = 200): Response {
+/**
+ * Extract the origin of the client's redirect URI, or undefined if it is
+ * malformed. Used to widen form-action just enough to let the consent POST's
+ * 302 reach the OAuth callback — see htmlResponse.
+ */
+function redirectOrigin(authRequest: AuthRequest): string | undefined {
+  try {
+    return new URL(authRequest.redirectUri).origin;
+  } catch {
+    return undefined;
+  }
+}
+
+function htmlResponse(body: string, status = 200, formActionOrigin?: string): Response {
+  // form-action must list the redirect target, not just 'self': browsers
+  // enforce it against the 302 that the consent POST returns, so without the
+  // callback's origin here the cross-origin redirect back to the client is
+  // blocked and the flow silently stalls on the consent page.
+  const formAction = ["'self'", formActionOrigin].filter(Boolean).join(' ');
   return new Response(body, {
     status,
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store',
       'Content-Security-Policy':
-        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+        `default-src 'none'; style-src 'unsafe-inline'; form-action ${formAction}; frame-ancestors 'none'; base-uri 'none'`,
       'X-Frame-Options': 'DENY',
       'Referrer-Policy': 'no-referrer',
     },
