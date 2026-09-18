@@ -109,6 +109,22 @@ interface MonthDetail {
   categories: Category[];
 }
 
+interface MonthSummaryRow {
+  month: string;
+  note?: string | null;
+  income: number;
+  budgeted: number;
+  activity: number;
+  to_be_budgeted: number;
+  age_of_money?: number | null;
+  deleted: boolean;
+}
+
+interface PlanSettings {
+  date_format?: { format: string } | null;
+  currency_format?: CurrencyFormat | null;
+}
+
 interface TransactionDetail {
   id: string;
   date: string;
@@ -345,6 +361,7 @@ export class YnabService {
       sinceDate?: string;
       accountId?: string;
       categoryId?: string;
+      payeeId?: string;
       type?: 'uncategorized' | 'unapproved';
       limit: number;
     },
@@ -354,7 +371,9 @@ export class YnabService {
       ? `${base}/accounts/${enc(options.accountId)}/transactions`
       : options.categoryId
         ? `${base}/categories/${enc(options.categoryId)}/transactions`
-        : `${base}/transactions`;
+        : options.payeeId
+          ? `${base}/payees/${enc(options.payeeId)}/transactions`
+          : `${base}/transactions`;
 
     const query: Record<string, string> = {};
     if (options.sinceDate) query.since_date = options.sinceDate;
@@ -670,14 +689,23 @@ export class YnabService {
   async updateCategory(
     budgetId: string,
     categoryId: string,
-    fields: { name?: string; note?: string },
+    fields: {
+      name?: string;
+      note?: string;
+      categoryGroupId?: string;
+      goalTargetMilliunits?: number;
+      goalTargetDate?: string;
+    },
   ): Promise<unknown> {
     this.#assertWritable();
     const body: Record<string, unknown> = {};
     if (fields.name !== undefined) body.name = fields.name;
     if (fields.note !== undefined) body.note = fields.note;
+    if (fields.categoryGroupId !== undefined) body.category_group_id = fields.categoryGroupId;
+    if (fields.goalTargetMilliunits !== undefined) body.goal_target = fields.goalTargetMilliunits;
+    if (fields.goalTargetDate !== undefined) body.goal_target_date = fields.goalTargetDate;
     if (Object.keys(body).length === 0) {
-      throw new YnabError('Provide a name or a note to update.');
+      throw new YnabError('Provide at least one field to update.');
     }
 
     const data = await this.#send<{ category: Category }>(
@@ -688,6 +716,36 @@ export class YnabService {
     return { updated: true, id: data.category.id, name: data.category.name };
   }
 
+  async createCategory(budgetId: string, name: string, categoryGroupId: string): Promise<unknown> {
+    this.#assertWritable();
+    const data = await this.#send<{ category: Category }>(
+      'POST',
+      `/plans/${enc(budgetId)}/categories`,
+      { category: { name, category_group_id: categoryGroupId } },
+    );
+    return { created: true, id: data.category.id, name: data.category.name };
+  }
+
+  async createCategoryGroup(budgetId: string, name: string): Promise<unknown> {
+    this.#assertWritable();
+    const data = await this.#send<{ category_group: CategoryGroup }>(
+      'POST',
+      `/plans/${enc(budgetId)}/category_groups`,
+      { category_group: { name } },
+    );
+    return { created: true, id: data.category_group.id, name: data.category_group.name };
+  }
+
+  async updateCategoryGroup(budgetId: string, groupId: string, name: string): Promise<unknown> {
+    this.#assertWritable();
+    const data = await this.#send<{ category_group: CategoryGroup }>(
+      'PATCH',
+      `/plans/${enc(budgetId)}/category_groups/${enc(groupId)}`,
+      { category_group: { name } },
+    );
+    return { updated: true, id: data.category_group.id, name: data.category_group.name };
+  }
+
   async updatePayee(budgetId: string, payeeId: string, name: string): Promise<unknown> {
     this.#assertWritable();
     const data = await this.#send<{ payee: Payee }>(
@@ -696,6 +754,81 @@ export class YnabService {
       { payee: { name } },
     );
     return { updated: true, id: data.payee.id, name: data.payee.name };
+  }
+
+  // -------------------------------------------------------- accounts & meta
+
+  async createAccount(
+    budgetId: string,
+    name: string,
+    type: string,
+    balanceMilliunits: number,
+  ): Promise<unknown> {
+    this.#assertWritable();
+    const currency = await this.currencyFor(budgetId);
+    const data = await this.#send<{ account: Account }>(
+      'POST',
+      `/plans/${enc(budgetId)}/accounts`,
+      { account: { name, type, balance: balanceMilliunits } },
+    );
+    const a = data.account;
+    return {
+      created: true,
+      id: a.id,
+      name: a.name,
+      type: a.type,
+      balance: this.money(a.balance, currency),
+    };
+  }
+
+  async importTransactions(budgetId: string): Promise<unknown> {
+    this.#assertWritable();
+    const data = await this.#send<{ transaction_ids: string[] }>(
+      'POST',
+      `/plans/${enc(budgetId)}/transactions/import`,
+      {},
+    );
+    return {
+      imported: data.transaction_ids.length,
+      transaction_ids: data.transaction_ids,
+      note:
+        data.transaction_ids.length === 0
+          ? 'No new transactions were available to import. This only pulls from linked (Direct Import) accounts.'
+          : undefined,
+    };
+  }
+
+  async listMonths(budgetId: string): Promise<unknown> {
+    const [currency, data] = await Promise.all([
+      this.currencyFor(budgetId),
+      this.#get<{ months: MonthSummaryRow[] }>(`/plans/${enc(budgetId)}/months`),
+    ]);
+    return data.months
+      .filter((m) => !m.deleted)
+      .map((m) => ({
+        month: m.month,
+        income: this.money(m.income, currency),
+        budgeted: this.money(m.budgeted, currency),
+        activity: this.money(m.activity, currency),
+        to_be_budgeted: this.money(m.to_be_budgeted, currency),
+        age_of_money: m.age_of_money ?? undefined,
+        note: m.note ?? undefined,
+      }));
+  }
+
+  async getUser(): Promise<unknown> {
+    const data = await this.#get<{ user: { id: string } }>('/user');
+    return { id: data.user.id };
+  }
+
+  async getBudgetSettings(budgetId: string): Promise<unknown> {
+    const data = await this.#get<{ settings: PlanSettings }>(`/plans/${enc(budgetId)}/settings`);
+    return {
+      date_format: data.settings.date_format?.format,
+      currency: data.settings.currency_format?.iso_code,
+      currency_symbol: data.settings.currency_format?.currency_symbol,
+      decimal_digits: data.settings.currency_format?.decimal_digits,
+    };
   }
 
   // ------------------------------------------------------------- internals

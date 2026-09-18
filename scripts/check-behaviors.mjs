@@ -96,7 +96,8 @@ const writeTools = [
   'create_transaction', 'set_category_budget', 'move_money',
   'update_transaction', 'bulk_update_transactions', 'delete_transaction',
   'create_scheduled_transaction', 'update_scheduled_transaction', 'delete_scheduled_transaction',
-  'update_category', 'update_payee',
+  'update_category', 'create_category', 'create_category_group', 'update_category_group',
+  'update_payee', 'create_account', 'import_transactions',
 ];
 const visibleWrites = writeTools.filter((t) => tools.includes(t));
 console.log(`write tools visible: ${visibleWrites.length ? visibleWrites.join(', ') : '(none)'}`);

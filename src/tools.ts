@@ -225,6 +225,10 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
           .describe('Only transactions on or after this date (YYYY-MM-DD).'),
         account_id: z.string().optional().describe('Restrict to one account.'),
         category_id: z.string().optional().describe('Restrict to one category. Ignored if account_id is set.'),
+        payee_id: z
+          .string()
+          .optional()
+          .describe('Restrict to one payee. Ignored if account_id or category_id is set.'),
         type: z
           .enum(['uncategorized', 'unapproved'])
           .optional()
@@ -233,12 +237,13 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ budget_id, since_date, account_id, category_id, type, limit }) =>
+    async ({ budget_id, since_date, account_id, category_id, payee_id, type, limit }) =>
       run(() =>
         ynab.listTransactions(ynab.budgetId(budget_id), {
           ...(since_date ? { sinceDate: since_date } : {}),
           ...(account_id ? { accountId: account_id } : {}),
           ...(category_id ? { categoryId: category_id } : {}),
+          ...(payee_id ? { payeeId: payee_id } : {}),
           ...(type ? { type } : {}),
           limit: limit ?? 50,
         }),
@@ -273,6 +278,41 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
     },
     async ({ budget_id, account_id }) =>
       run(() => ynab.listScheduledTransactions(ynab.budgetId(budget_id), account_id)),
+  );
+
+  server.registerTool(
+    'list_months',
+    {
+      title: 'List budget months',
+      description:
+        'List each budget month with its income, total budgeted, activity, and amount left to assign. Use this ' +
+        'for trends over time; use get_month_summary for the detail of a single month.',
+      inputSchema: { budget_id: budgetIdSchema },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ budget_id }) => run(() => ynab.listMonths(ynab.budgetId(budget_id))),
+  );
+
+  server.registerTool(
+    'get_budget_settings',
+    {
+      title: 'Get budget settings',
+      description: 'Get a budget’s currency and date-format settings.',
+      inputSchema: { budget_id: budgetIdSchema },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ budget_id }) => run(() => ynab.getBudgetSettings(ynab.budgetId(budget_id))),
+  );
+
+  server.registerTool(
+    'get_user',
+    {
+      title: 'Get user',
+      description: 'Return the authenticated YNAB user id. Rarely needed; mostly a connectivity check.',
+      inputSchema: {},
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async () => run(() => ynab.getUser()),
   );
 
   if (!allowWrites) return;
@@ -518,25 +558,125 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
   server.registerTool(
     'update_category',
     {
-      title: 'Rename or annotate category',
+      title: 'Edit category',
       description:
-        'Rename a category or set its note. To change how much is budgeted to a category, use set_category_budget ' +
-        'or move_money instead. (The YNAB API cannot create or delete categories, only edit existing ones.)',
+        'Edit an existing category: rename it, set its note, move it to another category group, or set a monthly ' +
+        'goal target. To change the amount assigned for a month, use set_category_budget or move_money instead. ' +
+        '(The API cannot delete categories.)',
       inputSchema: {
         budget_id: budgetIdSchema,
         category_id: z.string().describe('The category to edit. Get this from list_categories.'),
         name: z.string().max(100).optional().describe('New category name.'),
         note: z.string().max(500).optional().describe('New note (pass an empty string to clear it).'),
+        category_group_id: z.string().optional().describe('Move the category into this group. Get ids from list_categories.'),
+        goal_target: z
+          .number()
+          .optional()
+          .describe('Monthly goal target in currency units, e.g. 300 for $300. Creates a monthly goal if none exists.'),
+        goal_target_date: z
+          .string()
+          .regex(DATE_RE, 'Use YYYY-MM-DD')
+          .optional()
+          .describe('Target date for goals that have a deadline (YYYY-MM-DD).'),
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
     },
-    async ({ budget_id, category_id, name, note }) =>
+    async ({ budget_id, category_id, name, note, category_group_id, goal_target, goal_target_date }) =>
       run(() =>
         ynab.updateCategory(ynab.budgetId(budget_id), category_id, {
           ...(name !== undefined ? { name } : {}),
           ...(note !== undefined ? { note } : {}),
+          ...(category_group_id !== undefined ? { categoryGroupId: category_group_id } : {}),
+          ...(goal_target !== undefined ? { goalTargetMilliunits: toMilliunits(goal_target) } : {}),
+          ...(goal_target_date !== undefined ? { goalTargetDate: goal_target_date } : {}),
         }),
       ),
+  );
+
+  server.registerTool(
+    'create_category',
+    {
+      title: 'Create category',
+      description:
+        'Create a new category inside an existing category group. Get the group id from list_categories (the ' +
+        'group_id field). To fund it, follow up with set_category_budget.',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        name: z.string().min(1).max(100).describe('Name of the new category.'),
+        category_group_id: z.string().describe('The group to create it in. Get this from list_categories.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ budget_id, name, category_group_id }) =>
+      run(() => ynab.createCategory(ynab.budgetId(budget_id), name, category_group_id)),
+  );
+
+  server.registerTool(
+    'create_category_group',
+    {
+      title: 'Create category group',
+      description: 'Create a new category group. Add categories to it with create_category.',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        name: z.string().min(1).max(50).describe('Name of the new category group.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ budget_id, name }) => run(() => ynab.createCategoryGroup(ynab.budgetId(budget_id), name)),
+  );
+
+  server.registerTool(
+    'update_category_group',
+    {
+      title: 'Rename category group',
+      description: 'Rename an existing category group. Get the id from list_categories (group_id).',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        category_group_id: z.string().describe('The group to rename.'),
+        name: z.string().min(1).max(50).describe('New group name.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ budget_id, category_group_id, name }) =>
+      run(() => ynab.updateCategoryGroup(ynab.budgetId(budget_id), category_group_id, name)),
+  );
+
+  server.registerTool(
+    'create_account',
+    {
+      title: 'Create account',
+      description:
+        'Create a new account with a starting balance (plain currency; negative for a credit-card or loan balance ' +
+        'owed). Note: the API cannot edit or close accounts afterward — that has to be done in YNAB directly.',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        name: z.string().min(1).max(100).describe('Account name.'),
+        type: z
+          .enum(['checking', 'savings', 'cash', 'creditCard', 'otherAsset', 'otherLiability'])
+          .describe('Account type.'),
+        balance: z
+          .number()
+          .optional()
+          .describe('Starting balance in currency units. Negative for money owed. Defaults to 0.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ budget_id, name, type, balance }) =>
+      run(() => ynab.createAccount(ynab.budgetId(budget_id), name, type, toMilliunits(balance ?? 0))),
+  );
+
+  server.registerTool(
+    'import_transactions',
+    {
+      title: 'Import linked transactions',
+      description:
+        'Trigger an import of new transactions on all linked (Direct Import) accounts — the same as tapping ' +
+        '“Import” in YNAB. Returns the ids of any newly imported transactions. Does nothing for accounts ' +
+        'that are not bank-linked.',
+      inputSchema: { budget_id: budgetIdSchema },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ budget_id }) => run(() => ynab.importTransactions(ynab.budgetId(budget_id))),
   );
 
   server.registerTool(
