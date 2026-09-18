@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { YnabError, YnabService } from './ynab.js';
+import type { ScheduledEditFields, TxnEditFields } from './ynab.js';
 
 /**
  * MCP tool surface.
@@ -60,6 +61,84 @@ const budgetIdSchema = z
   .string()
   .optional()
   .describe('Budget (plan) id. Omit to use the server default, which is normally your last-used budget.');
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const FLAG_COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple'] as const;
+const CLEARED = ['cleared', 'uncleared', 'reconciled'] as const;
+const FREQUENCIES = [
+  'never', 'daily', 'weekly', 'everyOtherWeek', 'twiceAMonth', 'every4Weeks', 'monthly',
+  'everyOtherMonth', 'every3Months', 'every4Months', 'twiceAYear', 'yearly', 'everyOtherYear',
+] as const;
+
+/** Editable transaction fields, shared by update_transaction and the bulk item. */
+const txnEditShape = {
+  approved: z.boolean().optional().describe('Approve or unapprove the transaction.'),
+  category_id: z.string().optional().describe('Assign or change the category. Ids come from list_categories.'),
+  amount: z.number().optional().describe('New amount in currency units, negative for spending. E.g. -42.50.'),
+  date: z.string().regex(DATE_RE, 'Use YYYY-MM-DD').optional().describe('New transaction date (YYYY-MM-DD).'),
+  payee_name: z.string().max(200).optional().describe('New payee name. YNAB creates the payee if it is new.'),
+  memo: z.string().max(500).optional().describe('New memo.'),
+  cleared: z.enum(CLEARED).optional().describe('Cleared status.'),
+  flag_color: z.enum(FLAG_COLORS).optional().describe('Flag color.'),
+};
+
+/** Editable scheduled-transaction fields (the API has no cleared/approved here). */
+const scheduledEditShape = {
+  account_id: z.string().optional().describe('Move it to a different account.'),
+  amount: z.number().optional().describe('Amount in currency units, negative for spending. E.g. -15.99.'),
+  date: z.string().regex(DATE_RE, 'Use YYYY-MM-DD').optional().describe('Next scheduled date (YYYY-MM-DD), up to 5 years out.'),
+  frequency: z.enum(FREQUENCIES).optional().describe('How often it repeats. "never" means a single future transaction.'),
+  category_id: z.string().optional().describe('Category id from list_categories.'),
+  payee_name: z.string().max(200).optional().describe('Payee name.'),
+  memo: z.string().max(500).optional().describe('Memo.'),
+  flag_color: z.enum(FLAG_COLORS).optional().describe('Flag color.'),
+};
+
+type TxnEditArgs = {
+  approved?: boolean;
+  category_id?: string;
+  amount?: number;
+  date?: string;
+  payee_name?: string;
+  memo?: string;
+  cleared?: (typeof CLEARED)[number];
+  flag_color?: (typeof FLAG_COLORS)[number];
+};
+
+function toTxnFields(a: TxnEditArgs): TxnEditFields {
+  return {
+    ...(a.approved !== undefined ? { approved: a.approved } : {}),
+    ...(a.category_id !== undefined ? { categoryId: a.category_id } : {}),
+    ...(a.amount !== undefined ? { amountMilliunits: toMilliunits(a.amount) } : {}),
+    ...(a.date !== undefined ? { date: a.date } : {}),
+    ...(a.payee_name !== undefined ? { payeeName: a.payee_name } : {}),
+    ...(a.memo !== undefined ? { memo: a.memo } : {}),
+    ...(a.cleared !== undefined ? { cleared: a.cleared } : {}),
+    ...(a.flag_color !== undefined ? { flagColor: a.flag_color } : {}),
+  };
+}
+
+function toScheduledFields(a: {
+  account_id?: string;
+  amount?: number;
+  date?: string;
+  frequency?: (typeof FREQUENCIES)[number];
+  category_id?: string;
+  payee_name?: string;
+  memo?: string;
+  flag_color?: (typeof FLAG_COLORS)[number];
+}): ScheduledEditFields {
+  return {
+    ...(a.account_id !== undefined ? { accountId: a.account_id } : {}),
+    ...(a.amount !== undefined ? { amountMilliunits: toMilliunits(a.amount) } : {}),
+    ...(a.date !== undefined ? { date: a.date } : {}),
+    ...(a.frequency !== undefined ? { frequency: a.frequency } : {}),
+    ...(a.category_id !== undefined ? { categoryId: a.category_id } : {}),
+    ...(a.payee_name !== undefined ? { payeeName: a.payee_name } : {}),
+    ...(a.memo !== undefined ? { memo: a.memo } : {}),
+    ...(a.flag_color !== undefined ? { flagColor: a.flag_color } : {}),
+  };
+}
 
 export function registerTools(server: McpServer, ynab: YnabService, allowWrites: boolean): void {
   // ------------------------------------------------------------------ reads
@@ -179,6 +258,23 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
     async ({ budget_id }) => run(() => ynab.listPayees(ynab.budgetId(budget_id))),
   );
 
+  server.registerTool(
+    'list_scheduled_transactions',
+    {
+      title: 'List scheduled transactions',
+      description:
+        'List scheduled (recurring or future-dated) transactions, with their next date, frequency and amount. ' +
+        'Use this to find recurring charges — e.g. a duplicated subscription showing up as two schedules.',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        account_id: z.string().optional().describe('Restrict to one account.'),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ budget_id, account_id }) =>
+      run(() => ynab.listScheduledTransactions(ynab.budgetId(budget_id), account_id)),
+  );
+
   if (!allowWrites) return;
 
   // ----------------------------------------------------------------- writes
@@ -282,5 +378,182 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
           toMilliunits(amount),
         ),
       ),
+  );
+
+  server.registerTool(
+    'update_transaction',
+    {
+      title: 'Update transaction',
+      description:
+        'Edit an existing transaction. Use this to approve a pending transaction (approved: true), categorize an ' +
+        'uncategorized one (category_id), fix a wrong amount or payee, set cleared status, add a memo, or flag it. ' +
+        'Only the fields you pass are changed; everything else is left as-is. Get the id from list_transactions.',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        transaction_id: z.string().describe('The transaction to edit. Get this from list_transactions.'),
+        ...txnEditShape,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ budget_id, transaction_id, ...fields }) =>
+      run(() => ynab.updateTransaction(ynab.budgetId(budget_id), transaction_id, toTxnFields(fields))),
+  );
+
+  server.registerTool(
+    'bulk_update_transactions',
+    {
+      title: 'Update many transactions',
+      description:
+        'Edit several transactions in one request — the efficient way to approve or categorize a batch. Each entry ' +
+        'needs a transaction_id plus the fields to change on it. Done in a single API call to avoid rate limits.',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        updates: z
+          .array(z.object({ transaction_id: z.string(), ...txnEditShape }))
+          .min(1)
+          .max(200)
+          .describe('One entry per transaction: its id and the fields to change.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ budget_id, updates }) =>
+      run(() =>
+        ynab.bulkUpdateTransactions(
+          ynab.budgetId(budget_id),
+          updates.map((u) => ({ transactionId: u.transaction_id, ...toTxnFields(u) })),
+        ),
+      ),
+  );
+
+  server.registerTool(
+    'delete_transaction',
+    {
+      title: 'Delete transaction',
+      description:
+        'Permanently delete a transaction. Useful for removing a duplicate charge. This cannot be undone through ' +
+        'the API — get the id from list_transactions and be sure it is the right one.',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        transaction_id: z.string().describe('The transaction to delete. Get this from list_transactions.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ budget_id, transaction_id }) =>
+      run(() => ynab.deleteTransaction(ynab.budgetId(budget_id), transaction_id)),
+  );
+
+  server.registerTool(
+    'create_scheduled_transaction',
+    {
+      title: 'Create scheduled transaction',
+      description:
+        'Schedule a recurring or future-dated transaction. Amount is in plain currency (negative for spending).',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        account_id: z.string().describe('Account it belongs to. Get this from list_accounts.'),
+        date: z
+          .string()
+          .regex(DATE_RE, 'Use YYYY-MM-DD')
+          .describe('First/next scheduled date (YYYY-MM-DD), up to 5 years out.'),
+        frequency: z.enum(FREQUENCIES).describe('How often it repeats. "never" means a single future transaction.'),
+        amount: z.number().describe('Amount in currency units, negative for spending. E.g. -15.99.'),
+        category_id: z.string().optional().describe('Category id from list_categories.'),
+        payee_name: z.string().max(200).optional().describe('Payee name.'),
+        memo: z.string().max(500).optional().describe('Optional memo.'),
+        flag_color: z.enum(FLAG_COLORS).optional().describe('Flag color.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ budget_id, account_id, date, ...rest }) =>
+      run(() =>
+        ynab.createScheduledTransaction(ynab.budgetId(budget_id), {
+          accountId: account_id,
+          date,
+          ...toScheduledFields(rest),
+        }),
+      ),
+  );
+
+  server.registerTool(
+    'update_scheduled_transaction',
+    {
+      title: 'Update scheduled transaction',
+      description:
+        'Edit a scheduled transaction — change its amount, next date, frequency, category, payee or memo. Only the ' +
+        'fields you pass change. Get the id from list_scheduled_transactions.',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        scheduled_transaction_id: z.string().describe('The scheduled transaction to edit.'),
+        ...scheduledEditShape,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ budget_id, scheduled_transaction_id, ...fields }) =>
+      run(() =>
+        ynab.updateScheduledTransaction(
+          ynab.budgetId(budget_id),
+          scheduled_transaction_id,
+          toScheduledFields(fields),
+        ),
+      ),
+  );
+
+  server.registerTool(
+    'delete_scheduled_transaction',
+    {
+      title: 'Delete scheduled transaction',
+      description:
+        'Permanently delete a scheduled transaction — the fix for a duplicate recurring charge. Cannot be undone ' +
+        'through the API. Get the id from list_scheduled_transactions.',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        scheduled_transaction_id: z.string().describe('The scheduled transaction to delete.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ budget_id, scheduled_transaction_id }) =>
+      run(() => ynab.deleteScheduledTransaction(ynab.budgetId(budget_id), scheduled_transaction_id)),
+  );
+
+  server.registerTool(
+    'update_category',
+    {
+      title: 'Rename or annotate category',
+      description:
+        'Rename a category or set its note. To change how much is budgeted to a category, use set_category_budget ' +
+        'or move_money instead. (The YNAB API cannot create or delete categories, only edit existing ones.)',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        category_id: z.string().describe('The category to edit. Get this from list_categories.'),
+        name: z.string().max(100).optional().describe('New category name.'),
+        note: z.string().max(500).optional().describe('New note (pass an empty string to clear it).'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ budget_id, category_id, name, note }) =>
+      run(() =>
+        ynab.updateCategory(ynab.budgetId(budget_id), category_id, {
+          ...(name !== undefined ? { name } : {}),
+          ...(note !== undefined ? { note } : {}),
+        }),
+      ),
+  );
+
+  server.registerTool(
+    'update_payee',
+    {
+      title: 'Rename payee',
+      description:
+        'Rename a payee. Renaming to an existing payee’s exact name is how YNAB effectively merges them. (The ' +
+        'API exposes renaming only, not a dedicated merge, and cannot delete payees.)',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        payee_id: z.string().describe('The payee to rename. Get this from list_payees.'),
+        name: z.string().min(1).max(500).describe('New payee name.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ budget_id, payee_id, name }) =>
+      run(() => ynab.updatePayee(ynab.budgetId(budget_id), payee_id, name)),
   );
 }

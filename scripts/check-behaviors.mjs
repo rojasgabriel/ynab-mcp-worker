@@ -92,9 +92,27 @@ const tools = (await rpc(token, { jsonrpc: '2.0', id: 1, method: 'tools/list' })
 );
 console.log(`tools visible: ${tools.join(', ')}`);
 
-const writeTools = ['create_transaction', 'set_category_budget', 'move_money'];
+const writeTools = [
+  'create_transaction', 'set_category_budget', 'move_money',
+  'update_transaction', 'bulk_update_transactions', 'delete_transaction',
+  'create_scheduled_transaction', 'update_scheduled_transaction', 'delete_scheduled_transaction',
+  'update_category', 'update_payee',
+];
 const visibleWrites = writeTools.filter((t) => tools.includes(t));
 console.log(`write tools visible: ${visibleWrites.length ? visibleWrites.join(', ') : '(none)'}`);
+
+// list_scheduled_transactions is a read — it must always be present.
+if (!tools.includes('list_scheduled_transactions')) {
+  throw new Error('assertion failed: list_scheduled_transactions is missing from the read tools');
+}
+// When the granted scope includes ynab:write, every write tool must be registered.
+if (SCOPE.includes('ynab:write')) {
+  const missing = writeTools.filter((t) => !tools.includes(t));
+  if (missing.length) throw new Error(`assertion failed: write scope granted but tools missing: ${missing.join(', ')}`);
+  console.log('assertion ok: all write tools present under ynab:write');
+} else if (visibleWrites.length) {
+  throw new Error(`assertion failed: no write scope but write tools visible: ${visibleWrites.join(', ')}`);
+}
 
 const call = await rpc(token, {
   jsonrpc: '2.0',

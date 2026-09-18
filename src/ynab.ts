@@ -129,6 +129,48 @@ interface Payee {
   transfer_account_id?: string | null;
 }
 
+interface ScheduledTransactionDetail {
+  id: string;
+  date_first: string;
+  date_next: string;
+  frequency: string;
+  amount: number;
+  memo?: string | null;
+  flag_color?: string | null;
+  account_id: string;
+  account_name: string;
+  payee_name?: string | null;
+  category_name?: string | null;
+  deleted: boolean;
+}
+
+export type FlagColor = 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'purple';
+export type ClearedStatus = 'cleared' | 'uncleared' | 'reconciled';
+
+/** The editable fields shared by update_transaction and bulk_update_transactions. */
+export interface TxnEditFields {
+  approved?: boolean;
+  categoryId?: string;
+  amountMilliunits?: number;
+  date?: string;
+  payeeName?: string;
+  memo?: string;
+  cleared?: ClearedStatus;
+  flagColor?: FlagColor;
+}
+
+/** Editable fields for scheduled transactions (no cleared/approved on the API). */
+export interface ScheduledEditFields {
+  accountId?: string;
+  amountMilliunits?: number;
+  date?: string;
+  frequency?: string;
+  categoryId?: string;
+  payeeName?: string;
+  memo?: string;
+  flagColor?: FlagColor;
+}
+
 // ---------------------------------------------------------------------------
 
 export class YnabService {
@@ -503,7 +545,189 @@ export class YnabService {
     };
   }
 
+  async updateTransaction(
+    budgetId: string,
+    transactionId: string,
+    fields: TxnEditFields,
+  ): Promise<unknown> {
+    this.#assertWritable();
+    const body = txnBody(fields);
+    if (Object.keys(body).length === 0) {
+      throw new YnabError('No fields to update were provided.');
+    }
+
+    const currency = await this.currencyFor(budgetId);
+    const data = await this.#send<{ transaction: TransactionDetail }>(
+      'PUT',
+      `/plans/${enc(budgetId)}/transactions/${enc(transactionId)}`,
+      { transaction: body },
+    );
+
+    return { updated: true, transaction: this.#formatTxn(data.transaction, currency) };
+  }
+
+  async bulkUpdateTransactions(
+    budgetId: string,
+    updates: Array<{ transactionId: string } & TxnEditFields>,
+  ): Promise<unknown> {
+    this.#assertWritable();
+    if (updates.length === 0) throw new YnabError('No updates were provided.');
+
+    const transactions = updates.map((u) => {
+      const body = txnBody(u);
+      if (Object.keys(body).length === 0) {
+        throw new YnabError(`No fields to update were given for transaction ${u.transactionId}.`);
+      }
+      return { id: u.transactionId, ...body };
+    });
+
+    const currency = await this.currencyFor(budgetId);
+    const data = await this.#send<{ transactions: TransactionDetail[]; transaction_ids?: string[] }>(
+      'PATCH',
+      `/plans/${enc(budgetId)}/transactions`,
+      { transactions },
+    );
+
+    return {
+      updated: data.transaction_ids?.length ?? data.transactions.length,
+      transactions: data.transactions.map((t) => this.#formatTxn(t, currency)),
+    };
+  }
+
+  async deleteTransaction(budgetId: string, transactionId: string): Promise<unknown> {
+    this.#assertWritable();
+    const currency = await this.currencyFor(budgetId);
+    const data = await this.#delete<{ transaction: TransactionDetail }>(
+      `/plans/${enc(budgetId)}/transactions/${enc(transactionId)}`,
+    );
+    return { deleted: true, transaction: this.#formatTxn(data.transaction, currency) };
+  }
+
+  // --------------------------------------------------- scheduled transactions
+
+  async listScheduledTransactions(budgetId: string, accountId?: string): Promise<unknown> {
+    const [currency, data] = await Promise.all([
+      this.currencyFor(budgetId),
+      this.#get<{ scheduled_transactions: ScheduledTransactionDetail[] }>(
+        `/plans/${enc(budgetId)}/scheduled_transactions`,
+      ),
+    ]);
+
+    const live = data.scheduled_transactions.filter(
+      (s) => !s.deleted && (!accountId || s.account_id === accountId),
+    );
+    return {
+      returned: live.length,
+      scheduled_transactions: live.map((s) => this.#formatScheduled(s, currency)),
+    };
+  }
+
+  async createScheduledTransaction(
+    budgetId: string,
+    input: { accountId: string; date: string } & ScheduledEditFields,
+  ): Promise<unknown> {
+    this.#assertWritable();
+    const currency = await this.currencyFor(budgetId);
+    const data = await this.#send<{ scheduled_transaction: ScheduledTransactionDetail }>(
+      'POST',
+      `/plans/${enc(budgetId)}/scheduled_transactions`,
+      { scheduled_transaction: { account_id: input.accountId, date: input.date, ...scheduledBody(input) } },
+    );
+    return { created: true, scheduled_transaction: this.#formatScheduled(data.scheduled_transaction, currency) };
+  }
+
+  async updateScheduledTransaction(
+    budgetId: string,
+    scheduledTransactionId: string,
+    fields: ScheduledEditFields,
+  ): Promise<unknown> {
+    this.#assertWritable();
+    const body = scheduledBody(fields);
+    if (Object.keys(body).length === 0) {
+      throw new YnabError('No fields to update were provided.');
+    }
+
+    const currency = await this.currencyFor(budgetId);
+    const data = await this.#send<{ scheduled_transaction: ScheduledTransactionDetail }>(
+      'PUT',
+      `/plans/${enc(budgetId)}/scheduled_transactions/${enc(scheduledTransactionId)}`,
+      { scheduled_transaction: body },
+    );
+    return { updated: true, scheduled_transaction: this.#formatScheduled(data.scheduled_transaction, currency) };
+  }
+
+  async deleteScheduledTransaction(budgetId: string, scheduledTransactionId: string): Promise<unknown> {
+    this.#assertWritable();
+    const currency = await this.currencyFor(budgetId);
+    const data = await this.#delete<{ scheduled_transaction: ScheduledTransactionDetail }>(
+      `/plans/${enc(budgetId)}/scheduled_transactions/${enc(scheduledTransactionId)}`,
+    );
+    return { deleted: true, scheduled_transaction: this.#formatScheduled(data.scheduled_transaction, currency) };
+  }
+
+  // ------------------------------------------------- category & payee edits
+
+  async updateCategory(
+    budgetId: string,
+    categoryId: string,
+    fields: { name?: string; note?: string },
+  ): Promise<unknown> {
+    this.#assertWritable();
+    const body: Record<string, unknown> = {};
+    if (fields.name !== undefined) body.name = fields.name;
+    if (fields.note !== undefined) body.note = fields.note;
+    if (Object.keys(body).length === 0) {
+      throw new YnabError('Provide a name or a note to update.');
+    }
+
+    const data = await this.#send<{ category: Category }>(
+      'PATCH',
+      `/plans/${enc(budgetId)}/categories/${enc(categoryId)}`,
+      { category: body },
+    );
+    return { updated: true, id: data.category.id, name: data.category.name };
+  }
+
+  async updatePayee(budgetId: string, payeeId: string, name: string): Promise<unknown> {
+    this.#assertWritable();
+    const data = await this.#send<{ payee: Payee }>(
+      'PATCH',
+      `/plans/${enc(budgetId)}/payees/${enc(payeeId)}`,
+      { payee: { name } },
+    );
+    return { updated: true, id: data.payee.id, name: data.payee.name };
+  }
+
   // ------------------------------------------------------------- internals
+
+  #formatTxn(t: TransactionDetail, currency: CurrencyFormat) {
+    return {
+      id: t.id,
+      date: t.date,
+      amount: this.money(t.amount, currency),
+      payee: t.payee_name ?? undefined,
+      category: t.category_name ?? undefined,
+      account: t.account_name,
+      memo: t.memo ?? undefined,
+      cleared: t.cleared,
+      approved: t.approved,
+    };
+  }
+
+  #formatScheduled(s: ScheduledTransactionDetail, currency: CurrencyFormat) {
+    return {
+      id: s.id,
+      account: s.account_name,
+      payee: s.payee_name ?? undefined,
+      category: s.category_name ?? undefined,
+      amount: this.money(s.amount, currency),
+      frequency: s.frequency,
+      date_next: s.date_next,
+      date_first: s.date_first,
+      memo: s.memo ?? undefined,
+      flag_color: s.flag_color ?? undefined,
+    };
+  }
 
   #assertWritable(): void {
     if (!this.#allowWrites) {
@@ -521,6 +745,10 @@ export class YnabService {
 
   #send<T>(method: 'POST' | 'PATCH' | 'PUT', path: string, body: unknown): Promise<T> {
     return this.#request<T>(method, API_BASE + path, body);
+  }
+
+  #delete<T>(path: string): Promise<T> {
+    return this.#request<T>('DELETE', API_BASE + path);
   }
 
   async #request<T>(method: string, url: string, body?: unknown): Promise<T> {
@@ -559,6 +787,38 @@ export class YnabService {
 
 function enc(segment: string): string {
   return encodeURIComponent(segment);
+}
+
+/**
+ * Build a YNAB transaction body from only the fields the caller set. Omitted
+ * fields are left out entirely so a PUT/PATCH never clobbers what it did not
+ * mean to touch — YNAB leaves unspecified fields unchanged.
+ */
+export function txnBody(f: TxnEditFields): Record<string, unknown> {
+  const b: Record<string, unknown> = {};
+  if (f.approved !== undefined) b.approved = f.approved;
+  if (f.categoryId !== undefined) b.category_id = f.categoryId;
+  if (f.amountMilliunits !== undefined) b.amount = f.amountMilliunits;
+  if (f.date !== undefined) b.date = f.date;
+  if (f.payeeName !== undefined) b.payee_name = f.payeeName;
+  if (f.memo !== undefined) b.memo = f.memo;
+  if (f.cleared !== undefined) b.cleared = f.cleared;
+  if (f.flagColor !== undefined) b.flag_color = f.flagColor;
+  return b;
+}
+
+/** Same partial-body rule for scheduled transactions (no cleared/approved). */
+export function scheduledBody(f: ScheduledEditFields): Record<string, unknown> {
+  const b: Record<string, unknown> = {};
+  if (f.accountId !== undefined) b.account_id = f.accountId;
+  if (f.amountMilliunits !== undefined) b.amount = f.amountMilliunits;
+  if (f.date !== undefined) b.date = f.date;
+  if (f.frequency !== undefined) b.frequency = f.frequency;
+  if (f.categoryId !== undefined) b.category_id = f.categoryId;
+  if (f.payeeName !== undefined) b.payee_name = f.payeeName;
+  if (f.memo !== undefined) b.memo = f.memo;
+  if (f.flagColor !== undefined) b.flag_color = f.flagColor;
+  return b;
 }
 
 /** The envelope YNAB returns on an error: { error: { id: "404.2", name, detail } }. */
