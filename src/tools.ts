@@ -287,11 +287,15 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
       title: 'List payees',
       description:
         'List payees in a budget. Useful for resolving a payee name to an id, or for checking how a payee is ' +
-        'spelled before creating a transaction.',
-      inputSchema: { budget_id: budgetIdSchema },
+        'spelled before creating a transaction. Budgets with long histories have thousands of payees — pass query ' +
+        'to narrow the list.',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        query: z.string().optional().describe('Only payees whose name contains this text (case-insensitive).'),
+      },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ budget_id }) => run(() => ynab.listPayees(ynab.budgetId(budget_id))),
+    async ({ budget_id, query }) => run(() => ynab.listPayees(ynab.budgetId(budget_id), query)),
   );
 
   server.registerTool(
@@ -725,8 +729,8 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
     {
       title: 'Rename payee',
       description:
-        'Rename a payee. Renaming to an existing payee’s exact name is how YNAB effectively merges them. (The ' +
-        'API exposes renaming only, not a dedicated merge, and cannot delete payees.)',
+        'Rename a payee. This only changes the name: renaming one payee to another’s name does not merge them ' +
+        'through the API, it leaves two payees with the same name. To combine duplicates, use merge_payees.',
       inputSchema: {
         budget_id: budgetIdSchema,
         payee_id: z.string().describe('The payee to rename. Get this from list_payees.'),
@@ -736,5 +740,51 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
     },
     async ({ budget_id, payee_id, name }) =>
       run(() => ynab.updatePayee(ynab.budgetId(budget_id), payee_id, name)),
+  );
+
+  server.registerTool(
+    'merge_payees',
+    {
+      title: 'Merge payees',
+      description:
+        'Combine duplicate payees: every transaction and scheduled transaction on the source payees is moved to ' +
+        'the payee named target_name. If no payee has that exact name yet, one of the sources is renamed to it. ' +
+        'Venmo-style names such as `Caro Thurin "korean bbq"` lose their note when merged, so with note_to_memo ' +
+        '(the default) the note is copied into each transaction’s memo — appended after any existing memo text. ' +
+        'Several merges can go in one call; the whole batch costs a handful of API requests, not one per payee. ' +
+        'Run with dry_run first to see the counts. The API cannot delete payees, so the emptied ones stay behind ' +
+        'for the user to delete in YNAB. Lines inside split transactions are not moved and are reported as skipped.',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        merges: z
+          .array(
+            z.object({
+              target_name: z.string().min(1).max(200).describe('Name the merged payee should have.'),
+              source_payee_ids: z
+                .array(z.string())
+                .min(1)
+                .max(150)
+                .describe('Payee ids (from list_payees) to fold into the target.'),
+            }),
+          )
+          .min(1)
+          .max(40)
+          .describe('One entry per merged payee.'),
+        note_to_memo: z
+          .boolean()
+          .optional()
+          .describe('Copy a quoted note in a source payee’s name into its transactions’ memos. Defaults to true.'),
+        dry_run: z.boolean().optional().describe('Report what would change without writing anything.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ budget_id, merges, note_to_memo, dry_run }) =>
+      run(() =>
+        ynab.mergePayees(
+          ynab.budgetId(budget_id),
+          merges.map((m) => ({ targetName: m.target_name, sourcePayeeIds: m.source_payee_ids })),
+          { noteToMemo: note_to_memo ?? true, dryRun: dry_run ?? false },
+        ),
+      ),
   );
 }

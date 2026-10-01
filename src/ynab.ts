@@ -136,11 +136,13 @@ interface TransactionDetail {
   deleted: boolean;
   account_id: string;
   account_name: string;
+  payee_id?: string | null;
   payee_name?: string | null;
   category_id?: string | null;
   category_name?: string | null;
   transfer_account_id?: string | null;
   transfer_transaction_id?: string | null;
+  subtransactions?: Array<{ id: string; payee_id?: string | null; deleted?: boolean }>;
 }
 
 interface Payee {
@@ -160,11 +162,13 @@ interface ScheduledTransactionDetail {
   flag_color?: string | null;
   account_id: string;
   account_name: string;
+  payee_id?: string | null;
   payee_name?: string | null;
   category_id?: string | null;
   category_name?: string | null;
   transfer_account_id?: string | null;
   deleted: boolean;
+  subtransactions?: Array<{ id: string; deleted?: boolean }>;
 }
 
 export type FlagColor = 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'purple';
@@ -404,11 +408,156 @@ export class YnabService {
     };
   }
 
-  async listPayees(budgetId: string): Promise<unknown> {
+  async listPayees(budgetId: string, query?: string): Promise<unknown> {
     const data = await this.#get<{ payees: Payee[] }>(`/plans/${enc(budgetId)}/payees`);
+    const q = query?.trim().toLowerCase();
     return data.payees
-      .filter((p) => !p.deleted)
+      .filter((p) => !p.deleted && (!q || p.name.toLowerCase().includes(q)))
       .map((p) => ({ id: p.id, name: p.name, transfer_account_id: p.transfer_account_id }));
+  }
+
+  /**
+   * Merge payees: move every transaction and scheduled transaction from the
+   * source payees onto one target payee. YNAB's API has no merge (and cannot
+   * delete payees), so this reassigns by payee_id; the emptied source payees
+   * stay behind for the user to delete in the app.
+   *
+   * Request budget, whatever the size of the batch: one read each of payees,
+   * transactions and scheduled transactions, one rename per target that does
+   * not exist yet, one PATCH per 100 transactions, one PUT per scheduled
+   * transaction moved. That keeps a large cleanup inside the 200/hour limit.
+   */
+  async mergePayees(
+    budgetId: string,
+    merges: Array<{ targetName: string; sourcePayeeIds: string[] }>,
+    opts: { noteToMemo: boolean; dryRun: boolean },
+  ): Promise<unknown> {
+    if (!opts.dryRun) this.#assertWritable();
+    const base = `/plans/${enc(budgetId)}`;
+    const { payees } = await this.#get<{ payees: Payee[] }>(`${base}/payees`);
+    const live = payees.filter((p) => !p.deleted);
+    const byId = new Map(live.map((p) => [p.id, p]));
+
+    // ---- validate and resolve each merge's target
+    const seen = new Set<string>();
+    const plans = merges.map((m) => {
+      const targetName = m.targetName.trim();
+      if (!targetName) throw new YnabError('target_name cannot be empty.');
+      const sources: Payee[] = [];
+      for (const id of new Set(m.sourcePayeeIds)) {
+        const p = byId.get(id);
+        if (!p) throw new YnabError(`Payee ${id} was not found. list_payees returns the valid ids.`);
+        if (p.transfer_account_id) throw new YnabError(`"${p.name}" is a transfer payee and cannot be merged.`);
+        if (seen.has(id)) throw new YnabError(`Payee "${p.name}" appears in more than one merge.`);
+        seen.add(id);
+        sources.push(p);
+      }
+      const existing = live.find((p) => p.name === targetName);
+      if (existing?.transfer_account_id) {
+        throw new YnabError(`"${targetName}" is a transfer payee; pick a different target name.`);
+      }
+      // No payee has the target name yet: rename one source into it, preferring
+      // one without a Venmo-style note so no note lives only in a payee name.
+      const renamed = existing ? undefined : (sources.find((p) => !splitNote(p.name).note) ?? sources[0]);
+      const target = existing ?? renamed!;
+      return { targetName, target, renamed, sources: sources.filter((p) => p.id !== target.id || renamed) };
+    });
+
+    const [{ transactions }, { scheduled_transactions: scheduled }] = await Promise.all([
+      this.#get<{ transactions: TransactionDetail[] }>(`${base}/transactions`),
+      this.#get<{ scheduled_transactions: ScheduledTransactionDetail[] }>(`${base}/scheduled_transactions`),
+    ]);
+
+    // ---- build every edit before writing anything
+    const plannedTxns: Array<Record<string, unknown>> = [];
+    const plannedScheduled: Array<{ id: string; body: Record<string, unknown> }> = [];
+    const report = plans.map(({ targetName, target, renamed, sources }) => {
+      const stats = { transactions: 0, scheduled: 0, memos: 0, split_lines_skipped: 0 };
+      for (const src of sources) {
+        const note = opts.noteToMemo ? splitNote(src.name).note : undefined;
+        const moving = src.id !== target.id; // the renamed source only needs its notes kept
+        for (const t of transactions) {
+          if (t.deleted) continue;
+          stats.split_lines_skipped += (t.subtransactions ?? []).filter(
+            (st) => !st.deleted && st.payee_id === src.id,
+          ).length;
+          if (t.payee_id !== src.id) continue;
+          const memo = mergeMemo(t.memo, note);
+          if (!moving && memo === undefined) continue;
+          plannedTxns.push({ id: t.id, ...(moving ? { payee_id: target.id } : {}), ...(memo !== undefined ? { memo } : {}) });
+          if (moving) stats.transactions++;
+          if (memo !== undefined) stats.memos++;
+        }
+        for (const s of scheduled) {
+          if (s.deleted || s.payee_id !== src.id || (s.subtransactions ?? []).length > 0) continue;
+          const memo = mergeMemo(s.memo, note);
+          if (!moving && memo === undefined) continue;
+          plannedScheduled.push({
+            id: s.id,
+            body: {
+              account_id: s.account_id,
+              date: s.date_next,
+              amount: s.amount,
+              frequency: s.frequency,
+              payee_id: target.id,
+              category_id: s.category_id ?? null,
+              memo: memo ?? s.memo ?? null,
+              flag_color: s.flag_color ?? null,
+            },
+          });
+          stats.scheduled++;
+        }
+      }
+      return {
+        target: targetName,
+        target_payee_id: target.id,
+        ...(renamed ? { created_by_renaming: renamed.name } : {}),
+        merged_payees: sources.filter((p) => p.id !== target.id).map((p) => p.name),
+        ...stats,
+      };
+    });
+
+    const writesNeeded =
+      plans.filter((p) => p.renamed).length + Math.ceil(plannedTxns.length / 100) + plannedScheduled.length;
+    if (opts.dryRun) {
+      return {
+        dry_run: true,
+        merges: report,
+        totals: { transactions: plannedTxns.length, scheduled: plannedScheduled.length },
+        api_requests_needed: writesNeeded,
+      };
+    }
+    // A Worker invocation may make only ~50 outbound requests on the free plan;
+    // three reads are already spent. Refuse up front rather than fail halfway.
+    if (writesNeeded > 45) {
+      throw new YnabError(
+        `This batch needs ${writesNeeded} write requests, more than one call can make. Split the merges into ` +
+          'smaller batches (fewer targets that need creating, or fewer scheduled transactions per call).',
+      );
+    }
+
+    // ---- write: renames first, so payee_id targets exist under their final names
+    for (const p of plans) {
+      if (p.renamed && p.renamed.name !== p.targetName) {
+        await this.#send('PATCH', `${base}/payees/${enc(p.renamed.id)}`, { payee: { name: p.targetName } });
+      }
+    }
+    for (let i = 0; i < plannedTxns.length; i += 100) {
+      await this.#send('PATCH', `${base}/transactions`, { transactions: plannedTxns.slice(i, i + 100) });
+    }
+    for (const s of plannedScheduled) {
+      await this.#send('PUT', `${base}/scheduled_transactions/${enc(s.id)}`, { scheduled_transaction: s.body });
+    }
+
+    const emptied = report.flatMap((r) => r.merged_payees);
+    return {
+      merged: report,
+      totals: { transactions: plannedTxns.length, scheduled: plannedScheduled.length },
+      emptied_payees: emptied.length,
+      next_step:
+        'The API cannot delete payees, so the emptied ones remain with no transactions. Delete or combine them in ' +
+        'YNAB under Manage Payees.',
+    };
   }
 
   // ---------------------------------------------------------------- writes
@@ -989,6 +1138,28 @@ export function txnBody(f: TxnEditFields): Record<string, unknown> {
   if (f.cleared !== undefined) b.cleared = f.cleared;
   if (f.flagColor !== undefined) b.flag_color = f.flagColor;
   return b;
+}
+
+/**
+ * Venmo imports put the payment note in the payee name: `Caro Thurin "korean bbq"`.
+ * Split that into the person and the note so a merge can keep the note.
+ */
+export function splitNote(name: string): { base: string; note?: string } {
+  const m = /^(.*?\S)\s*"(.+)"\s*$/s.exec(name);
+  return m?.[1] && m[2] ? { base: m[1], note: m[2].trim() } : { base: name };
+}
+
+/**
+ * The memo to write when carrying a note over, or undefined when nothing
+ * changes: an empty memo takes the note; an existing memo keeps its text and
+ * gains the note after a separator, unless it already contains it. Capped at
+ * YNAB's 500-character memo limit.
+ */
+export function mergeMemo(memo: string | null | undefined, note: string | undefined): string | undefined {
+  if (!note) return undefined;
+  const current = (memo ?? '').trim();
+  if (current.includes(note)) return undefined;
+  return (current ? `${current} · ${note}` : note).slice(0, 500);
 }
 
 /** Same partial-body rule for scheduled transactions (no cleared/approved). */
