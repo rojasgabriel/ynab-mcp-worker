@@ -72,12 +72,20 @@ const transferAccountSchema = z
       'payee_name. YNAB creates the opposite-sign counterpart on that account automatically.',
   );
 
+const TRANSFER_AMOUNT_AND_CATEGORY =
+  'the amount is from the source’s side, negative when money leaves it (e.g. -500 moves $500 out of the source into ' +
+  'the destination). Between two budget accounts a transfer has no category — omit category_id. From a budget ' +
+  'account to a tracking (off-budget) account such as a loan, category_id is required (the category that pays that ' +
+  'account). Enter a transfer before the bank imports arrive and both imported sides will match it.';
+
+/** For tools that take account_id: it is the transfer's source. */
 const TRANSFER_RULES =
-  ' Transfers: set account_id to the source and transfer_account_id to the destination; the amount is from the ' +
-  'source’s side, negative when money leaves it (e.g. -500 moves $500 out of the source into the destination). ' +
-  'Between two budget accounts a transfer has no category — omit category_id. From a budget account to a tracking ' +
-  '(off-budget) account such as a loan, category_id is required (the category that pays that account). Enter a ' +
-  'transfer before the bank imports arrive and both imported sides will match it.';
+  ' Transfers: set account_id to the source and transfer_account_id to the destination; ' + TRANSFER_AMOUNT_AND_CATEGORY;
+
+/** For update_transaction, which has no account_id: the source is the account the transaction is already on. */
+const TRANSFER_RULES_EXISTING =
+  ' Transfers: the source is the account the transaction is already on; set transfer_account_id to the ' +
+  'destination; ' + TRANSFER_AMOUNT_AND_CATEGORY;
 const FLAG_COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple'] as const;
 const CLEARED = ['cleared', 'uncleared', 'reconciled'] as const;
 const FREQUENCIES = [
@@ -183,7 +191,8 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
       title: 'List accounts',
       description:
         'List accounts in a budget with their current, cleared and uncleared balances. ' +
-        'Closed accounts are excluded unless you ask for them.',
+        'Closed accounts are excluded unless you ask for them. Each account’s id is what transfer_account_id takes ' +
+        'when recording a transfer to it.',
       inputSchema: {
         budget_id: budgetIdSchema,
         include_closed: z.boolean().optional().describe('Include closed accounts. Defaults to false.'),
@@ -236,7 +245,8 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
       description:
         'List transactions, most recent first. Filter by date, account, or category, and optionally show only ' +
         'uncategorized or unapproved transactions. Results are capped to keep responses small — narrow the ' +
-        'filters rather than raising the limit when you can.',
+        'filters rather than raising the limit when you can. Transfers carry transfer_account, transfer_account_id ' +
+        'and transfer_transaction_id (the linked counterpart on the other account).',
       inputSchema: {
         budget_id: budgetIdSchema,
         since_date: z
@@ -454,7 +464,7 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
         'Only the fields you pass are changed; everything else is left as-is. Get the id from list_transactions. ' +
         'Setting transfer_account_id converts it into a transfer, and YNAB then creates the counterpart on the other ' +
         'account — if that side was already imported, check list_transactions first, or delete the duplicate after.' +
-        TRANSFER_RULES,
+        TRANSFER_RULES_EXISTING,
       inputSchema: {
         budget_id: budgetIdSchema,
         transaction_id: z.string().describe('The transaction to edit. Get this from list_transactions.'),
