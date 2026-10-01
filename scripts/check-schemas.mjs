@@ -57,8 +57,13 @@ for (const name of ['update_transaction', 'bulk_update_transactions']) {
 assert.match(tool('list_accounts').description, /transfer/i, 'list_accounts should mention transfer_payee_id / transfers');
 assert.match(tool('list_transactions').description, /transfer/i, 'list_transactions should mention transfer fields');
 
+// Payee merging is advertised, and update_payee no longer claims a rename merges.
+assert.ok(tool('merge_payees').inputSchema.properties.merges.items.properties.source_payee_ids, 'merge_payees schema');
+assert.doesNotMatch(tool('update_payee').description, /effectively merges/);
+assert.ok(tool('list_payees').inputSchema.properties.query, 'list_payees query filter');
+
 // A read-only deployment advertises none of the write tools.
 const readOnly = await listTools(false);
-for (const name of Object.keys(props)) assert.ok(!readOnly.has(name), `${name} advertised without writes enabled`);
+for (const name of [...Object.keys(props), 'merge_payees']) assert.ok(!readOnly.has(name), `${name} advertised without writes enabled`);
 
 console.log(`schema checks passed (${tools.size} tools advertised with writes, ${readOnly.size} read-only)`);
