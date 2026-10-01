@@ -73,6 +73,7 @@ interface Account {
   cleared_balance: number;
   uncleared_balance: number;
   last_reconciled_at?: string;
+  transfer_payee_id?: string | null;
 }
 
 interface Category {
@@ -133,9 +134,13 @@ interface TransactionDetail {
   cleared: string;
   approved: boolean;
   deleted: boolean;
+  account_id: string;
   account_name: string;
   payee_name?: string | null;
+  category_id?: string | null;
   category_name?: string | null;
+  transfer_account_id?: string | null;
+  transfer_transaction_id?: string | null;
 }
 
 interface Payee {
@@ -156,7 +161,9 @@ interface ScheduledTransactionDetail {
   account_id: string;
   account_name: string;
   payee_name?: string | null;
+  category_id?: string | null;
   category_name?: string | null;
+  transfer_account_id?: string | null;
   deleted: boolean;
 }
 
@@ -173,6 +180,7 @@ export interface TxnEditFields {
   memo?: string;
   cleared?: ClearedStatus;
   flagColor?: FlagColor;
+  transferAccountId?: string;
 }
 
 /** Editable fields for scheduled transactions (no cleared/approved on the API). */
@@ -185,6 +193,7 @@ export interface ScheduledEditFields {
   payeeName?: string;
   memo?: string;
   flagColor?: FlagColor;
+  transferAccountId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +291,7 @@ export class YnabService {
         uncleared_balance: this.money(a.uncleared_balance, currency),
         balance_milliunits: a.balance,
         last_reconciled_at: a.last_reconciled_at,
+        transfer_payee_id: a.transfer_payee_id ?? undefined,
       }));
   }
 
@@ -390,18 +400,7 @@ export class YnabService {
     return {
       returned: rows.length,
       total_matching: live.length,
-      transactions: rows.map((t) => ({
-        id: t.id,
-        date: t.date,
-        amount: this.money(t.amount, currency),
-        amount_milliunits: t.amount,
-        payee: t.payee_name ?? undefined,
-        category: t.category_name ?? undefined,
-        account: t.account_name,
-        memo: t.memo ?? undefined,
-        cleared: t.cleared,
-        approved: t.approved,
-      })),
+      transactions: rows.map((t) => ({ ...this.#formatTxn(t, currency), amount_milliunits: t.amount })),
     };
   }
 
@@ -425,10 +424,14 @@ export class YnabService {
       memo?: string;
       cleared?: 'cleared' | 'uncleared' | 'reconciled';
       approved?: boolean;
+      transferAccountId?: string;
     },
   ): Promise<unknown> {
     this.#assertWritable();
     const currency = await this.currencyFor(budgetId);
+    const transfer = input.transferAccountId
+      ? transferBody(await this.#accounts(budgetId), input.accountId, input.transferAccountId, input)
+      : {};
 
     const data = await this.#send<{ transaction: TransactionDetail | null }>(
       'POST',
@@ -443,6 +446,7 @@ export class YnabService {
           ...(input.payeeName ? { payee_name: input.payeeName } : {}),
           ...(input.categoryId ? { category_id: input.categoryId } : {}),
           ...(input.memo ? { memo: input.memo } : {}),
+          ...transfer,
         },
       },
     );
@@ -450,15 +454,7 @@ export class YnabService {
     const created = data.transaction;
     if (!created) throw new YnabError('YNAB accepted the request but returned no transaction.');
 
-    return {
-      created: true,
-      id: created.id,
-      date: created.date,
-      amount: this.money(created.amount, currency),
-      payee: created.payee_name ?? undefined,
-      category: created.category_name ?? undefined,
-      account: created.account_name,
-    };
+    return { created: true, ...this.#formatTxn(created, currency) };
   }
 
   async updateBudgetedAmount(
@@ -571,6 +567,10 @@ export class YnabService {
   ): Promise<unknown> {
     this.#assertWritable();
     const body = txnBody(fields);
+    if (fields.transferAccountId) {
+      const [existing, accounts] = await Promise.all([this.#txn(budgetId, transactionId), this.#accounts(budgetId)]);
+      Object.assign(body, transferBody(accounts, existing.account_id, fields.transferAccountId, fields, existing.category_id));
+    }
     if (Object.keys(body).length === 0) {
       throw new YnabError('No fields to update were provided.');
     }
@@ -592,8 +592,25 @@ export class YnabService {
     this.#assertWritable();
     if (updates.length === 0) throw new YnabError('No updates were provided.');
 
+    // Transfers need each source transaction's account. Two requests total,
+    // never one per entry, to stay inside the 200/hour rate limit.
+    // ponytail: the full transaction list can be large on old budgets; pass a since_date if that bites.
+    const hasTransfer = updates.some((u) => u.transferAccountId);
+    const [accounts, existing] = hasTransfer
+      ? await Promise.all([
+          this.#accounts(budgetId),
+          this.#get<{ transactions: TransactionDetail[] }>(`/plans/${enc(budgetId)}/transactions`),
+        ])
+      : [[], { transactions: [] }];
+    const byId = new Map(existing.transactions.map((t) => [t.id, t]));
+
     const transactions = updates.map((u) => {
       const body = txnBody(u);
+      if (u.transferAccountId) {
+        const source = byId.get(u.transactionId);
+        if (!source) throw new YnabError(`Transaction ${u.transactionId} was not found.`);
+        Object.assign(body, transferBody(accounts, source.account_id, u.transferAccountId, u, source.category_id));
+      }
       if (Object.keys(body).length === 0) {
         throw new YnabError(`No fields to update were given for transaction ${u.transactionId}.`);
       }
@@ -647,10 +664,13 @@ export class YnabService {
   ): Promise<unknown> {
     this.#assertWritable();
     const currency = await this.currencyFor(budgetId);
+    const transfer = input.transferAccountId
+      ? transferBody(await this.#accounts(budgetId), input.accountId, input.transferAccountId, input)
+      : {};
     const data = await this.#send<{ scheduled_transaction: ScheduledTransactionDetail }>(
       'POST',
       `/plans/${enc(budgetId)}/scheduled_transactions`,
-      { scheduled_transaction: { account_id: input.accountId, date: input.date, ...scheduledBody(input) } },
+      { scheduled_transaction: { account_id: input.accountId, date: input.date, ...scheduledBody(input), ...transfer } },
     );
     return { created: true, scheduled_transaction: this.#formatScheduled(data.scheduled_transaction, currency) };
   }
@@ -662,6 +682,16 @@ export class YnabService {
   ): Promise<unknown> {
     this.#assertWritable();
     const body = scheduledBody(fields);
+    if (fields.transferAccountId) {
+      const [{ scheduled_transaction: existing }, accounts] = await Promise.all([
+        this.#get<{ scheduled_transaction: ScheduledTransactionDetail }>(
+          `/plans/${enc(budgetId)}/scheduled_transactions/${enc(scheduledTransactionId)}`,
+        ),
+        this.#accounts(budgetId),
+      ]);
+      const source = fields.accountId ?? existing.account_id;
+      Object.assign(body, transferBody(accounts, source, fields.transferAccountId, fields, existing.category_id));
+    }
     if (Object.keys(body).length === 0) {
       throw new YnabError('No fields to update were provided.');
     }
@@ -844,6 +874,14 @@ export class YnabService {
       memo: t.memo ?? undefined,
       cleared: t.cleared,
       approved: t.approved,
+      ...(t.transfer_account_id
+        ? {
+            // YNAB names a transfer payee "Transfer : <account name>".
+            transfer_account: t.payee_name?.replace(/^Transfer : /, ''),
+            transfer_account_id: t.transfer_account_id,
+            transfer_transaction_id: t.transfer_transaction_id ?? undefined,
+          }
+        : {}),
     };
   }
 
@@ -859,7 +897,20 @@ export class YnabService {
       date_first: s.date_first,
       memo: s.memo ?? undefined,
       flag_color: s.flag_color ?? undefined,
+      transfer_account_id: s.transfer_account_id ?? undefined,
     };
+  }
+
+  async #accounts(budgetId: string): Promise<Account[]> {
+    return (await this.#get<{ accounts: Account[] }>(`/plans/${enc(budgetId)}/accounts`)).accounts;
+  }
+
+  async #txn(budgetId: string, transactionId: string): Promise<TransactionDetail> {
+    return (
+      await this.#get<{ transaction: TransactionDetail }>(
+        `/plans/${enc(budgetId)}/transactions/${enc(transactionId)}`,
+      )
+    ).transaction;
   }
 
   #assertWritable(): void {
@@ -952,6 +1003,50 @@ export function scheduledBody(f: ScheduledEditFields): Record<string, unknown> {
   if (f.memo !== undefined) b.memo = f.memo;
   if (f.flagColor !== undefined) b.flag_color = f.flagColor;
   return b;
+}
+
+/**
+ * Validate a transfer from `sourceId` to `destId` and return the body fields
+ * that make a transaction one: the destination's transfer payee, plus an
+ * explicit null category when both sides are on-budget (such transfers carry
+ * no category). `existingCategoryId` is the category already on a transaction
+ * being converted, which satisfies the on-budget -> tracking category rule.
+ */
+export function transferBody(
+  accounts: Array<Pick<Account, 'id' | 'name' | 'on_budget' | 'closed' | 'deleted' | 'transfer_payee_id'>>,
+  sourceId: string,
+  destId: string,
+  f: { payeeName?: string; categoryId?: string },
+  existingCategoryId?: string | null,
+): Record<string, unknown> {
+  if (f.payeeName !== undefined) {
+    throw new YnabError('Pass either payee_name or transfer_account_id, not both — a transfer’s payee is the destination account.');
+  }
+  if (destId === sourceId) {
+    throw new YnabError('transfer_account_id is the same account the transaction is on. Pick a different destination account.');
+  }
+  const source = accounts.find((a) => a.id === sourceId && !a.deleted);
+  const dest = accounts.find((a) => a.id === destId && !a.deleted);
+  if (!source) throw new YnabError(`Account ${sourceId} was not found. list_accounts returns the valid ids.`);
+  if (!dest) throw new YnabError(`Transfer account ${destId} was not found. list_accounts returns the valid ids.`);
+  if (dest.closed) throw new YnabError(`"${dest.name}" is closed; transfers to a closed account are not allowed.`);
+  if (!dest.transfer_payee_id) throw new YnabError(`YNAB returned no transfer payee for "${dest.name}".`);
+
+  if (source.on_budget && dest.on_budget) {
+    if (f.categoryId !== undefined) {
+      throw new YnabError(
+        `"${source.name}" and "${dest.name}" are both budget accounts, so a transfer between them has no category. Omit category_id.`,
+      );
+    }
+    return { payee_id: dest.transfer_payee_id, category_id: null };
+  }
+  if (source.on_budget && !(f.categoryId ?? existingCategoryId)) {
+    throw new YnabError(
+      `"${dest.name}" is a tracking (off-budget) account, so the transfer out of budget account "${source.name}" ` +
+        'needs a category_id — usually the category that funds that account (e.g. its loan or debt category).',
+    );
+  }
+  return { payee_id: dest.transfer_payee_id };
 }
 
 /** The envelope YNAB returns on an error: { error: { id: "404.2", name, detail } }. */

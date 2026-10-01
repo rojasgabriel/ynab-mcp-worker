@@ -63,6 +63,21 @@ const budgetIdSchema = z
   .describe('Budget (plan) id. Omit to use the server default, which is normally your last-used budget.');
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+const transferAccountSchema = z
+  .string()
+  .optional()
+  .describe(
+    'Make this a transfer to this account (id from list_accounts) instead of a payee purchase. Do not combine with ' +
+      'payee_name. YNAB creates the opposite-sign counterpart on that account automatically.',
+  );
+
+const TRANSFER_RULES =
+  ' Transfers: set account_id to the source and transfer_account_id to the destination; the amount is from the ' +
+  'source’s side, negative when money leaves it (e.g. -500 moves $500 out of the source into the destination). ' +
+  'Between two budget accounts a transfer has no category — omit category_id. From a budget account to a tracking ' +
+  '(off-budget) account such as a loan, category_id is required (the category that pays that account). Enter a ' +
+  'transfer before the bank imports arrive and both imported sides will match it.';
 const FLAG_COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple'] as const;
 const CLEARED = ['cleared', 'uncleared', 'reconciled'] as const;
 const FREQUENCIES = [
@@ -80,6 +95,7 @@ const txnEditShape = {
   memo: z.string().max(500).optional().describe('New memo.'),
   cleared: z.enum(CLEARED).optional().describe('Cleared status.'),
   flag_color: z.enum(FLAG_COLORS).optional().describe('Flag color.'),
+  transfer_account_id: transferAccountSchema,
 };
 
 /** Editable scheduled-transaction fields (the API has no cleared/approved here). */
@@ -92,6 +108,7 @@ const scheduledEditShape = {
   payee_name: z.string().max(200).optional().describe('Payee name.'),
   memo: z.string().max(500).optional().describe('Memo.'),
   flag_color: z.enum(FLAG_COLORS).optional().describe('Flag color.'),
+  transfer_account_id: transferAccountSchema,
 };
 
 type TxnEditArgs = {
@@ -103,6 +120,7 @@ type TxnEditArgs = {
   memo?: string;
   cleared?: (typeof CLEARED)[number];
   flag_color?: (typeof FLAG_COLORS)[number];
+  transfer_account_id?: string;
 };
 
 function toTxnFields(a: TxnEditArgs): TxnEditFields {
@@ -115,6 +133,7 @@ function toTxnFields(a: TxnEditArgs): TxnEditFields {
     ...(a.memo !== undefined ? { memo: a.memo } : {}),
     ...(a.cleared !== undefined ? { cleared: a.cleared } : {}),
     ...(a.flag_color !== undefined ? { flagColor: a.flag_color } : {}),
+    ...(a.transfer_account_id !== undefined ? { transferAccountId: a.transfer_account_id } : {}),
   };
 }
 
@@ -127,6 +146,7 @@ function toScheduledFields(a: {
   payee_name?: string;
   memo?: string;
   flag_color?: (typeof FLAG_COLORS)[number];
+  transfer_account_id?: string;
 }): ScheduledEditFields {
   return {
     ...(a.account_id !== undefined ? { accountId: a.account_id } : {}),
@@ -137,6 +157,7 @@ function toScheduledFields(a: {
     ...(a.payee_name !== undefined ? { payeeName: a.payee_name } : {}),
     ...(a.memo !== undefined ? { memo: a.memo } : {}),
     ...(a.flag_color !== undefined ? { flagColor: a.flag_color } : {}),
+    ...(a.transfer_account_id !== undefined ? { transferAccountId: a.transfer_account_id } : {}),
   };
 }
 
@@ -325,7 +346,8 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
       title: 'Create transaction',
       description:
         'Record a new transaction. Amounts are in plain currency: negative for money leaving the account ' +
-        '(a purchase), positive for money arriving (income, a refund). For example -42.50 for a $42.50 expense.',
+        '(a purchase), positive for money arriving (income, a refund). For example -42.50 for a $42.50 expense.' +
+        TRANSFER_RULES,
       inputSchema: {
         budget_id: budgetIdSchema,
         account_id: z.string().describe('Account the transaction belongs to. Get this from list_accounts.'),
@@ -344,6 +366,7 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
           .optional()
           .describe('Cleared status. Defaults to uncleared.'),
         approved: z.boolean().optional().describe('Whether the transaction is approved. Defaults to true.'),
+        transfer_account_id: transferAccountSchema,
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
@@ -358,6 +381,7 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
           ...(args.memo ? { memo: args.memo } : {}),
           ...(args.cleared ? { cleared: args.cleared } : {}),
           ...(args.approved !== undefined ? { approved: args.approved } : {}),
+          ...(args.transfer_account_id ? { transferAccountId: args.transfer_account_id } : {}),
         }),
       ),
   );
@@ -427,7 +451,10 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
       description:
         'Edit an existing transaction. Use this to approve a pending transaction (approved: true), categorize an ' +
         'uncategorized one (category_id), fix a wrong amount or payee, set cleared status, add a memo, or flag it. ' +
-        'Only the fields you pass are changed; everything else is left as-is. Get the id from list_transactions.',
+        'Only the fields you pass are changed; everything else is left as-is. Get the id from list_transactions. ' +
+        'Setting transfer_account_id converts it into a transfer, and YNAB then creates the counterpart on the other ' +
+        'account — if that side was already imported, check list_transactions first, or delete the duplicate after.' +
+        TRANSFER_RULES,
       inputSchema: {
         budget_id: budgetIdSchema,
         transaction_id: z.string().describe('The transaction to edit. Get this from list_transactions.'),
@@ -445,7 +472,8 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
       title: 'Update many transactions',
       description:
         'Edit several transactions in one request — the efficient way to approve or categorize a batch. Each entry ' +
-        'needs a transaction_id plus the fields to change on it. Done in a single API call to avoid rate limits.',
+        'needs a transaction_id plus the fields to change on it. Done in a single API call to avoid rate limits. ' +
+        'Entries may set transfer_account_id, with the same rules as update_transaction.',
       inputSchema: {
         budget_id: budgetIdSchema,
         updates: z
@@ -471,7 +499,8 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
       title: 'Delete transaction',
       description:
         'Permanently delete a transaction. Useful for removing a duplicate charge. This cannot be undone through ' +
-        'the API — get the id from list_transactions and be sure it is the right one.',
+        'the API — get the id from list_transactions and be sure it is the right one. Deleting either side of a ' +
+        'transfer deletes both sides.',
       inputSchema: {
         budget_id: budgetIdSchema,
         transaction_id: z.string().describe('The transaction to delete. Get this from list_transactions.'),
@@ -487,7 +516,8 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
     {
       title: 'Create scheduled transaction',
       description:
-        'Schedule a recurring or future-dated transaction. Amount is in plain currency (negative for spending).',
+        'Schedule a recurring or future-dated transaction. Amount is in plain currency (negative for spending).' +
+        TRANSFER_RULES,
       inputSchema: {
         budget_id: budgetIdSchema,
         account_id: z.string().describe('Account it belongs to. Get this from list_accounts.'),
@@ -501,6 +531,7 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
         payee_name: z.string().max(200).optional().describe('Payee name.'),
         memo: z.string().max(500).optional().describe('Optional memo.'),
         flag_color: z.enum(FLAG_COLORS).optional().describe('Flag color.'),
+        transfer_account_id: transferAccountSchema,
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
@@ -520,7 +551,7 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
       title: 'Update scheduled transaction',
       description:
         'Edit a scheduled transaction — change its amount, next date, frequency, category, payee or memo. Only the ' +
-        'fields you pass change. Get the id from list_scheduled_transactions.',
+        'fields you pass change. Get the id from list_scheduled_transactions.' + TRANSFER_RULES,
       inputSchema: {
         budget_id: budgetIdSchema,
         scheduled_transaction_id: z.string().describe('The scheduled transaction to edit.'),

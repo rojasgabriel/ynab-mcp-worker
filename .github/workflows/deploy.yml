@@ -40,6 +40,7 @@ jobs:
 
       # Catch type errors before they reach production rather than after.
       - run: npm run typecheck
+      - run: npm test
 
       - uses: cloudflare/wrangler-action@v4
         with:
