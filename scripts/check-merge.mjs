@@ -40,7 +40,7 @@ let calls;
 globalThis.fetch = async (url, init = {}) => {
   const path = new URL(url).pathname.replace('/v1/plans/b', '');
   const body = init.body ? JSON.parse(init.body) : undefined;
-  calls.push({ method: init.method, path, body });
+  calls.push({ method: init.method, path, body, since: new URL(url).searchParams.get('since_date') });
   const data =
     path === '/payees' ? { payees: PAYEES }
     : path === '/transactions' && init.method === 'GET' ? { transactions: TXNS }
@@ -68,6 +68,8 @@ assert.equal(dry.merges[0].created_by_renaming, 'Caro');
 assert.deepEqual(dry.merges[0].merged_payees, ['Caro Thurin "korean bbq"', 'Caro Thurin "🍣"']);
 assert.equal(dry.merges[1].split_lines_skipped, 1);
 assert.equal(calls.length, 3, 'one read each of payees, transactions, scheduled');
+// YNAB returns only recent transactions without since_date, so the merge must ask for full history
+assert.equal(calls.find((c) => c.path === '/transactions').since, '2000-01-01');
 
 // real run
 calls = [];

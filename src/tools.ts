@@ -253,7 +253,7 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
           .string()
           .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD')
           .optional()
-          .describe('Only transactions on or after this date (YYYY-MM-DD).'),
+          .describe('Only transactions on or after this date (YYYY-MM-DD). Defaults to the full history.'),
         account_id: z.string().optional().describe('Restrict to one account.'),
         category_id: z.string().optional().describe('Restrict to one category. Ignored if account_id is set.'),
         payee_id: z
