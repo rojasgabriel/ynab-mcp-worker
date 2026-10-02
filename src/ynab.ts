@@ -202,6 +202,13 @@ export interface ScheduledEditFields {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * YNAB's /plans transaction endpoints return only a recent window when since_date
+ * is omitted, so any read meant to cover a payee's or the budget's whole history
+ * has to pass an explicit early date.
+ */
+export const FULL_HISTORY_SINCE = '2000-01-01';
+
 export class YnabService {
   readonly #token: string;
   readonly #allowWrites: boolean;
@@ -390,7 +397,7 @@ export class YnabService {
           : `${base}/transactions`;
 
     const query: Record<string, string> = {};
-    if (options.sinceDate) query.since_date = options.sinceDate;
+    query.since_date = options.sinceDate ?? FULL_HISTORY_SINCE;
     if (options.type) query.type = options.type;
 
     const [currency, data] = await Promise.all([
@@ -464,7 +471,7 @@ export class YnabService {
     });
 
     const [{ transactions }, { scheduled_transactions: scheduled }] = await Promise.all([
-      this.#get<{ transactions: TransactionDetail[] }>(`${base}/transactions`),
+      this.#get<{ transactions: TransactionDetail[] }>(`${base}/transactions`, { since_date: FULL_HISTORY_SINCE }),
       this.#get<{ scheduled_transactions: ScheduledTransactionDetail[] }>(`${base}/scheduled_transactions`),
     ]);
 
@@ -743,12 +750,13 @@ export class YnabService {
 
     // Transfers need each source transaction's account. Two requests total,
     // never one per entry, to stay inside the 200/hour rate limit.
-    // ponytail: the full transaction list can be large on old budgets; pass a since_date if that bites.
     const hasTransfer = updates.some((u) => u.transferAccountId);
     const [accounts, existing] = hasTransfer
       ? await Promise.all([
           this.#accounts(budgetId),
-          this.#get<{ transactions: TransactionDetail[] }>(`/plans/${enc(budgetId)}/transactions`),
+          this.#get<{ transactions: TransactionDetail[] }>(`/plans/${enc(budgetId)}/transactions`, {
+            since_date: FULL_HISTORY_SINCE,
+          }),
         ])
       : [[], { transactions: [] }];
     const byId = new Map(existing.transactions.map((t) => [t.id, t]));
