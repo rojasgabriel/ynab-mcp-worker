@@ -11,7 +11,7 @@
  *   node scripts/smoke-test.mjs <base-url> <passphrase>
  *
  * Example:
- *   node scripts/smoke-test.mjs https://ynab-mcp.fly.dev 'my-long-passphrase'
+ *   node scripts/smoke-test.mjs https://ynab-mcp-worker.your-subdomain.workers.dev 'your-passphrase'
  *
  * Exits non-zero if any check fails.
  */

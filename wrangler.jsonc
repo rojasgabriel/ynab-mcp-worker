@@ -1,7 +1,7 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	// Pick your own name — it becomes part of the URL:
-	//   https://<name>.<your-subdomain>.workers.dev
+	// Forking? Change `name` (it becomes https://<name>.<subdomain>.workers.dev)
+	// and replace the KV id below with a namespace you created.
 	"name": "ynab-mcp-worker",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-09-01",
@@ -15,10 +15,8 @@
 	"observability": {
 		"enabled": true
 	},
-	// The OAuth provider keeps registered clients, grants and tokens here.
-	// Create it once with:
+	// OAuth clients, grants and tokens. Create your own with:
 	//   npx wrangler kv namespace create OAUTH_KV
-	// then paste the returned id below.
 	"kv_namespaces": [
 		{
 			"binding": "OAUTH_KV",
@@ -26,7 +24,7 @@
 		}
 	],
 	"vars": {
-		// Start read-only. Set to "true" and redeploy once you trust it.
+		// This deployment allows writes. Forks should start with "false".
 		"YNAB_ALLOW_WRITES": "true",
 		"YNAB_DEFAULT_BUDGET_ID": "last-used",
 		"SERVER_LABEL": "YNAB MCP"

@@ -4,7 +4,7 @@ import mcpHandler from './mcp.js';
 import type { Env } from '../worker-configuration.js';
 
 /**
- * ynab-mcp-server on Cloudflare Workers.
+ * ynab-mcp-worker on Cloudflare Workers.
  *
  * OAuthProvider is the whole authorization server: dynamic client
  * registration, PKCE, token issuance, refresh and rotation, and both
