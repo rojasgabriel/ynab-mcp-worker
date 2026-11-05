@@ -380,11 +380,13 @@ export class YnabService {
     budgetId: string,
     options: {
       sinceDate?: string;
+      untilDate?: string;
       accountId?: string;
       categoryId?: string;
       payeeId?: string;
       type?: 'uncategorized' | 'unapproved';
       limit: number;
+      offset?: number;
     },
   ): Promise<unknown> {
     const base = `/plans/${enc(budgetId)}`;
@@ -405,12 +407,20 @@ export class YnabService {
       this.#get<{ transactions: TransactionDetail[] }>(path, query),
     ]);
 
-    const live = data.transactions.filter((t) => !t.deleted);
-    const rows = [...live].sort((a, b) => b.date.localeCompare(a.date)).slice(0, options.limit);
+    // YNAB has no upper date bound, so until_date is applied here (dates are YYYY-MM-DD, so string compare works).
+    const live = data.transactions.filter(
+      (t) => !t.deleted && (!options.untilDate || t.date <= options.untilDate),
+    );
+    const offset = options.offset ?? 0;
+    const rows = [...live]
+      .sort((a, b) => b.date.localeCompare(a.date) || a.id.localeCompare(b.id))
+      .slice(offset, offset + options.limit);
 
     return {
       returned: rows.length,
       total_matching: live.length,
+      offset,
+      has_more: offset + rows.length < live.length,
       transactions: rows.map((t) => ({ ...this.#formatTxn(t, currency), amount_milliunits: t.amount })),
     };
   }

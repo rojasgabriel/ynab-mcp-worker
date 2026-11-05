@@ -245,8 +245,10 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
       description:
         'List transactions, most recent first. Filter by date, account, or category, and optionally show only ' +
         'uncategorized or unapproved transactions. Results are capped to keep responses small — narrow the ' +
-        'filters rather than raising the limit when you can. Transfers carry transfer_account, transfer_account_id ' +
-        'and transfer_transaction_id (the linked counterpart on the other account).',
+        'filters rather than raising the limit when you can. To read a long history, page through it: pass ' +
+        'offset (skip that many of the most recent matches) or a since_date/until_date window, and keep going ' +
+        'while returned + offset < total_matching (has_more says so). Transfers carry transfer_account, ' +
+        'transfer_account_id and transfer_transaction_id (the linked counterpart on the other account).',
       inputSchema: {
         budget_id: budgetIdSchema,
         since_date: z
@@ -254,6 +256,11 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
           .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD')
           .optional()
           .describe('Only transactions on or after this date (YYYY-MM-DD). Defaults to the full history.'),
+        until_date: z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD')
+          .optional()
+          .describe('Only transactions on or before this date (YYYY-MM-DD). Combine with since_date for a window.'),
         account_id: z.string().optional().describe('Restrict to one account.'),
         category_id: z.string().optional().describe('Restrict to one category. Ignored if account_id is set.'),
         payee_id: z
@@ -265,13 +272,21 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
           .optional()
           .describe('Show only uncategorized or only unapproved transactions.'),
         limit: z.number().int().min(1).max(200).optional().describe('Maximum rows to return. Default 50.'),
+        offset: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe('Skip this many of the most recent matching transactions before returning rows. Default 0.'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ budget_id, since_date, account_id, category_id, payee_id, type, limit }) =>
+    async ({ budget_id, since_date, until_date, account_id, category_id, payee_id, type, limit, offset }) =>
       run(() =>
         ynab.listTransactions(ynab.budgetId(budget_id), {
           ...(since_date ? { sinceDate: since_date } : {}),
+          ...(until_date ? { untilDate: until_date } : {}),
+          ...(offset ? { offset } : {}),
           ...(account_id ? { accountId: account_id } : {}),
           ...(category_id ? { categoryId: category_id } : {}),
           ...(payee_id ? { payeeId: payee_id } : {}),

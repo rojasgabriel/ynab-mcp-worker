@@ -56,6 +56,11 @@ for (const name of ['update_transaction', 'bulk_update_transactions']) {
 // Read responses expose the ids needed to build and recognise transfers.
 assert.match(tool('list_accounts').description, /transfer/i, 'list_accounts should mention transfer_payee_id / transfers');
 assert.match(tool('list_transactions').description, /transfer/i, 'list_transactions should mention transfer fields');
+// Long histories can be paged: offset and until_date are advertised, and the description says how.
+for (const p of ['offset', 'until_date']) {
+  assert.ok(tool('list_transactions').inputSchema.properties[p], `list_transactions: ${p} missing from the advertised inputSchema`);
+}
+assert.match(tool('list_transactions').description, /has_more/, 'list_transactions should explain how to page');
 
 // Payee merging is advertised, and update_payee no longer claims a rename merges.
 assert.ok(tool('merge_payees').inputSchema.properties.merges.items.properties.source_payee_ids, 'merge_payees schema');
