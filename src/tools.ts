@@ -62,6 +62,12 @@ const budgetIdSchema = z
   .optional()
   .describe('Budget (plan) id. Omit to use the server default, which is normally your last-used budget.');
 
+const optionalMonthSchema = z.string().optional().describe(
+  'Budget month (current, YYYY-MM, or YYYY-MM-DD). Omit to list across months.',
+);
+const pageLimitSchema = z.number().int().min(1).max(200).optional().describe('Maximum rows to return. Default 50.');
+const pageOffsetSchema = z.number().int().min(0).optional().describe('Number of matching rows to skip. Default 0.');
+
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 const transferAccountSchema = z
@@ -186,6 +192,18 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
   );
 
   server.registerTool(
+    'get_budget',
+    {
+      title: 'Get budget details',
+      description: 'Get one budget’s metadata and counts of the resources returned by YNAB.',
+      inputSchema: { budget_id: budgetIdSchema },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ budget_id }) =>
+      run(() => ynab.getBudget(ynab.budgetId(budget_id))),
+  );
+
+  server.registerTool(
     'list_accounts',
     {
       title: 'List accounts',
@@ -204,6 +222,21 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
   );
 
   server.registerTool(
+    'get_account',
+    {
+      title: 'Get account',
+      description: 'Get one account and its balances by id.',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        account_id: z.string().describe('Account id from list_accounts.'),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ budget_id, account_id }) =>
+      run(() => ynab.getAccount(ynab.budgetId(budget_id), account_id)),
+  );
+
+  server.registerTool(
     'list_categories',
     {
       title: 'List categories',
@@ -218,6 +251,21 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
     },
     async ({ budget_id, include_hidden }) =>
       run(() => ynab.listCategories(ynab.budgetId(budget_id), include_hidden ?? false)),
+  );
+
+  server.registerTool(
+    'get_category',
+    {
+      title: 'Get category',
+      description: 'Get one category by id, including its assigned amount, activity, balance, and any target.',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        category_id: z.string().describe('Category id from list_categories.'),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ budget_id, category_id }) =>
+      run(() => ynab.getCategory(ynab.budgetId(budget_id), category_id)),
   );
 
   server.registerTool(
@@ -243,7 +291,8 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
     {
       title: 'List transactions',
       description:
-        'List transactions, most recent first. Filter by date, account, or category, and optionally show only ' +
+        'List transactions, most recent first. Filter by date, account, category, payee, or budget month. ' +
+        'For a month combined with an account, category, or payee, use a date range instead. Optionally show only ' +
         'uncategorized or unapproved transactions. Results are capped to keep responses small — narrow the ' +
         'filters rather than raising the limit when you can. To read a long history, page through it: pass ' +
         'offset (skip that many of the most recent matches) or a since_date/until_date window, and keep going ' +
@@ -251,6 +300,7 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
         'transfer_account_id and transfer_transaction_id (the linked counterpart on the other account).',
       inputSchema: {
         budget_id: budgetIdSchema,
+        month: optionalMonthSchema,
         since_date: z
           .string()
           .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD')
@@ -281,9 +331,10 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ budget_id, since_date, until_date, account_id, category_id, payee_id, type, limit, offset }) =>
+    async ({ budget_id, month, since_date, until_date, account_id, category_id, payee_id, type, limit, offset }) =>
       run(() =>
         ynab.listTransactions(ynab.budgetId(budget_id), {
+          ...(month !== undefined ? { month: normalizeMonth(month) } : {}),
           ...(since_date ? { sinceDate: since_date } : {}),
           ...(until_date ? { untilDate: until_date } : {}),
           ...(offset ? { offset } : {}),
@@ -314,6 +365,51 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
   );
 
   server.registerTool(
+    'get_payee',
+    {
+      title: 'Get payee',
+      description: 'Get one payee by id, including the destination account id if it is a transfer payee.',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        payee_id: z.string().describe('Payee id from list_payees.'),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ budget_id, payee_id }) =>
+      run(() => ynab.getPayee(ynab.budgetId(budget_id), payee_id)),
+  );
+
+  server.registerTool(
+    'list_payee_locations',
+    {
+      title: 'List payee locations',
+      description: 'List saved payee locations and their coordinates. Optionally restrict the list to one payee.',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        payee_id: z.string().optional().describe('Payee id from list_payees.'),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ budget_id, payee_id }) =>
+      run(() => ynab.listPayeeLocations(ynab.budgetId(budget_id), payee_id)),
+  );
+
+  server.registerTool(
+    'get_payee_location',
+    {
+      title: 'Get payee location',
+      description: 'Get one saved payee location by id.',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        payee_location_id: z.string().describe('Location id from list_payee_locations.'),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ budget_id, payee_location_id }) =>
+      run(() => ynab.getPayeeLocation(ynab.budgetId(budget_id), payee_location_id)),
+  );
+
+  server.registerTool(
     'list_scheduled_transactions',
     {
       title: 'List scheduled transactions',
@@ -341,6 +437,50 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ budget_id }) => run(() => ynab.listMonths(ynab.budgetId(budget_id))),
+  );
+
+  server.registerTool(
+    'list_money_movements',
+    {
+      title: 'List money movements',
+      description: 'List the history of money moved between budget categories. Use offset to read more rows while has_more is true.',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        month: optionalMonthSchema,
+        limit: pageLimitSchema,
+        offset: pageOffsetSchema,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ budget_id, month, limit, offset }) =>
+      run(() => ynab.listMoneyMovements(
+        ynab.budgetId(budget_id),
+        month === undefined ? undefined : normalizeMonth(month),
+        limit ?? 50,
+        offset ?? 0,
+      )),
+  );
+
+  server.registerTool(
+    'list_money_movement_groups',
+    {
+      title: 'List money movement groups',
+      description: 'List groups of related budget money movements. Use offset to read more rows while has_more is true.',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        month: optionalMonthSchema,
+        limit: pageLimitSchema,
+        offset: pageOffsetSchema,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ budget_id, month, limit, offset }) =>
+      run(() => ynab.listMoneyMovementGroups(
+        ynab.budgetId(budget_id),
+        month === undefined ? undefined : normalizeMonth(month),
+        limit ?? 50,
+        offset ?? 0,
+      )),
   );
 
   server.registerTool(
@@ -737,6 +877,21 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
     async ({ budget_id }) => run(() => ynab.importTransactions(ynab.budgetId(budget_id))),
+  );
+
+  server.registerTool(
+    'create_payee',
+    {
+      title: 'Create payee',
+      description: 'Create a new payee by name. Use list_payees to check for an existing payee before creating or retrying.',
+      inputSchema: {
+        budget_id: budgetIdSchema,
+        name: z.string().trim().min(1).max(500).describe('Name of the new payee.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ budget_id, name }) =>
+      run(() => ynab.createPayee(ynab.budgetId(budget_id), name)),
   );
 
   server.registerTool(

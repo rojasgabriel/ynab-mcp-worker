@@ -30,11 +30,14 @@ Amounts in tool arguments and responses are ordinary currency (`-42.50`), not YN
 | Tool | Purpose |
 | --- | --- |
 | `list_budgets` | Budgets the token can see |
-| `list_accounts` | Accounts and balances |
-| `list_categories` | Category groups and categories |
+| `get_budget` | Budget metadata and resource counts |
+| `list_accounts`, `get_account` | Accounts and balances |
+| `list_categories`, `get_category` | Category groups and categories |
 | `get_month_summary` | One month’s budget, activity, and balance |
-| `list_transactions` | Transactions, with optional filters |
-| `list_payees` | Payees |
+| `list_transactions` | Transactions, with optional filters including budget month |
+| `list_payees`, `get_payee` | Payees |
+| `list_payee_locations`, `get_payee_location` | Saved payee locations |
+| `list_money_movements`, `list_money_movement_groups` | Budget allocation history, optionally by month |
 | `list_scheduled_transactions` | Upcoming scheduled transactions |
 | `list_months` | Months that have budget data |
 | `get_budget_settings` | Currency and date format |
@@ -45,7 +48,7 @@ Amounts in tool arguments and responses are ordinary currency (`-42.50`), not YN
 Transactions: `create_transaction`, `update_transaction`, `bulk_update_transactions`, `delete_transaction`, `import_transactions`  
 Scheduled: `create_scheduled_transaction`, `update_scheduled_transaction`, `delete_scheduled_transaction`  
 Budget: `set_category_budget`, `move_money`, `update_category`, `create_category`, `create_category_group`, `update_category_group`  
-Accounts and payees: `create_account`, `update_payee`, `merge_payees`
+Accounts and payees: `create_account`, `create_payee`, `update_payee`, `merge_payees`
 
 Writes are gated twice: the Worker flag, and the OAuth scope on the Claude connection (`ynab:read` vs `ynab:write`). A read-only connection does not list write tools.
 

@@ -62,6 +62,29 @@ interface Plan {
   accounts?: Account[];
 }
 
+interface PlanDetail extends Plan {
+  payees?: Payee[];
+  category_groups?: CategoryGroup[];
+  categories?: Category[];
+  months?: MonthSummaryRow[];
+  transactions?: TransactionDetail[];
+  scheduled_transactions?: ScheduledTransactionDetail[];
+}
+
+interface MoneyMovement {
+  id: string;
+  amount: number;
+  amount_formatted?: string;
+  amount_currency?: number;
+  month?: string | null;
+  moved_at?: string | null;
+  note?: string | null;
+  money_movement_group_id?: string | null;
+  performed_by_user_id?: string | null;
+  from_category_id?: string | null;
+  to_category_id?: string | null;
+}
+
 interface Account {
   id: string;
   name: string;
@@ -283,6 +306,44 @@ export class YnabService {
     }));
   }
 
+  async getBudget(budgetId: string): Promise<unknown> {
+    const { plan, server_knowledge } = await this.#get<{ plan: PlanDetail; server_knowledge: number }>(
+      `/plans/${enc(budgetId)}`,
+    );
+    return {
+      id: plan.id,
+      name: plan.name,
+      last_modified_on: plan.last_modified_on,
+      first_month: plan.first_month,
+      last_month: plan.last_month,
+      currency: plan.currency_format?.iso_code,
+      server_knowledge,
+      accounts: plan.accounts?.length,
+      categories: plan.categories?.length,
+      category_groups: plan.category_groups?.length,
+      payees: plan.payees?.length,
+      months: plan.months?.length,
+      transactions: plan.transactions?.length,
+      scheduled_transactions: plan.scheduled_transactions?.length,
+    };
+  }
+
+  async getAccount(budgetId: string, accountId: string): Promise<unknown> {
+    const [currency, { account }] = await Promise.all([
+      this.currencyFor(budgetId),
+      this.#get<{ account: Account }>(`/plans/${enc(budgetId)}/accounts/${enc(accountId)}`),
+    ]);
+    return this.#formatAccount(account, currency);
+  }
+
+  async getCategory(budgetId: string, categoryId: string): Promise<unknown> {
+    const [currency, { category }] = await Promise.all([
+      this.currencyFor(budgetId),
+      this.#get<{ category: Category }>(`/plans/${enc(budgetId)}/categories/${enc(categoryId)}`),
+    ]);
+    return this.#formatCategory(category, currency);
+  }
+
   async listAccounts(budgetId: string, includeClosed: boolean): Promise<unknown> {
     const [currency, data] = await Promise.all([
       this.currencyFor(budgetId),
@@ -291,19 +352,7 @@ export class YnabService {
 
     return data.accounts
       .filter((a) => !a.deleted && (includeClosed || !a.closed))
-      .map((a) => ({
-        id: a.id,
-        name: a.name,
-        type: a.type,
-        on_budget: a.on_budget,
-        closed: a.closed,
-        balance: this.money(a.balance, currency),
-        cleared_balance: this.money(a.cleared_balance, currency),
-        uncleared_balance: this.money(a.uncleared_balance, currency),
-        balance_milliunits: a.balance,
-        last_reconciled_at: a.last_reconciled_at,
-        transfer_payee_id: a.transfer_payee_id ?? undefined,
-      }));
+      .map((account) => this.#formatAccount(account, currency));
   }
 
   async listCategories(budgetId: string, includeHidden: boolean): Promise<unknown> {
@@ -319,28 +368,7 @@ export class YnabService {
         group_id: group.id,
         categories: group.categories
           .filter((c) => !c.deleted && (includeHidden || !c.hidden))
-          .map((c) => ({
-            id: c.id,
-            name: c.name,
-            budgeted: this.money(c.budgeted, currency),
-            activity: this.money(c.activity, currency),
-            balance: this.money(c.balance, currency),
-            balance_milliunits: c.balance,
-            ...(c.goal_type
-              ? {
-                  goal: {
-                    type: c.goal_type,
-                    target: c.goal_target != null ? this.money(c.goal_target, currency) : undefined,
-                    target_month: c.goal_target_month,
-                    percent_complete: c.goal_percentage_complete,
-                    under_funded:
-                      c.goal_under_funded != null
-                        ? this.money(c.goal_under_funded, currency)
-                        : undefined,
-                  },
-                }
-              : {}),
-          })),
+          .map((category) => this.#formatCategory(category, currency)),
       }));
   }
 
@@ -379,6 +407,7 @@ export class YnabService {
   async listTransactions(
     budgetId: string,
     options: {
+      month?: string;
       sinceDate?: string;
       untilDate?: string;
       accountId?: string;
@@ -390,16 +419,25 @@ export class YnabService {
     },
   ): Promise<unknown> {
     const base = `/plans/${enc(budgetId)}`;
-    const path = options.accountId
-      ? `${base}/accounts/${enc(options.accountId)}/transactions`
-      : options.categoryId
-        ? `${base}/categories/${enc(options.categoryId)}/transactions`
-        : options.payeeId
-          ? `${base}/payees/${enc(options.payeeId)}/transactions`
-          : `${base}/transactions`;
+    if (options.month && (options.accountId || options.categoryId || options.payeeId)) {
+      throw new YnabError(
+        'Use either month or an account, category, or payee filter. To combine them, use since_date and until_date.',
+      );
+    }
+    const path = options.month
+      ? `${base}/months/${enc(options.month)}/transactions`
+      : options.accountId
+        ? `${base}/accounts/${enc(options.accountId)}/transactions`
+        : options.categoryId
+          ? `${base}/categories/${enc(options.categoryId)}/transactions`
+          : options.payeeId
+            ? `${base}/payees/${enc(options.payeeId)}/transactions`
+            : `${base}/transactions`;
 
     const query: Record<string, string> = {};
-    query.since_date = options.sinceDate ?? FULL_HISTORY_SINCE;
+    if (options.sinceDate) query.since_date = options.sinceDate;
+    else if (!options.month) query.since_date = FULL_HISTORY_SINCE;
+    if (options.month && options.untilDate) query.until_date = options.untilDate;
     if (options.type) query.type = options.type;
 
     const [currency, data] = await Promise.all([
@@ -407,7 +445,7 @@ export class YnabService {
       this.#get<{ transactions: TransactionDetail[] }>(path, query),
     ]);
 
-    // YNAB has no upper date bound, so until_date is applied here (dates are YYYY-MM-DD, so string compare works).
+    // Apply the upper date bound locally for the existing list routes.
     const live = data.transactions.filter(
       (t) => !t.deleted && (!options.untilDate || t.date <= options.untilDate),
     );
@@ -422,6 +460,73 @@ export class YnabService {
       offset,
       has_more: offset + rows.length < live.length,
       transactions: rows.map((t) => ({ ...this.#formatTxn(t, currency), amount_milliunits: t.amount })),
+    };
+  }
+
+  async getPayee(budgetId: string, payeeId: string): Promise<unknown> {
+    const { payee } = await this.#get<{ payee: Payee }>(`/plans/${enc(budgetId)}/payees/${enc(payeeId)}`);
+    return { id: payee.id, name: payee.name, transfer_account_id: payee.transfer_account_id };
+  }
+
+  async listPayeeLocations(budgetId: string, payeeId?: string): Promise<unknown> {
+    const planPath = `/plans/${enc(budgetId)}`;
+    const path = payeeId ? `${planPath}/payees/${enc(payeeId)}/payee_locations` : `${planPath}/payee_locations`;
+    const { payee_locations } = await this.#get<{ payee_locations: unknown[] }>(path);
+    return { payee_locations };
+  }
+
+  async getPayeeLocation(budgetId: string, locationId: string): Promise<unknown> {
+    const { payee_location } = await this.#get<{ payee_location: unknown }>(
+      `/plans/${enc(budgetId)}/payee_locations/${enc(locationId)}`,
+    );
+    return payee_location;
+  }
+
+  async listMoneyMovements(
+    budgetId: string,
+    month: string | undefined,
+    limit: number,
+    offset: number,
+  ): Promise<unknown> {
+    const planPath = `/plans/${enc(budgetId)}`;
+    const base = month ? `${planPath}/months/${enc(month)}` : planPath;
+    const [currency, { money_movements, server_knowledge }] = await Promise.all([
+      this.currencyFor(budgetId),
+      this.#get<{ money_movements: MoneyMovement[]; server_knowledge: number }>(`${base}/money_movements`),
+    ]);
+    const rows = money_movements.slice(offset, offset + limit);
+    return {
+      returned: rows.length,
+      total_matching: money_movements.length,
+      offset,
+      has_more: offset + rows.length < money_movements.length,
+      server_knowledge,
+      money_movements: rows.map(({ amount, amount_formatted, amount_currency, ...movement }) => ({
+        ...movement,
+        amount: amount_formatted ?? this.money(amount, currency),
+        amount_currency: amount_currency ?? amount / 1000,
+      })),
+    };
+  }
+
+  async listMoneyMovementGroups(
+    budgetId: string,
+    month: string | undefined,
+    limit: number,
+    offset: number,
+  ): Promise<unknown> {
+    const planPath = `/plans/${enc(budgetId)}`;
+    const base = month ? `${planPath}/months/${enc(month)}` : planPath;
+    const { money_movement_groups, server_knowledge } =
+      await this.#get<{ money_movement_groups: unknown[]; server_knowledge: number }>(`${base}/money_movement_groups`);
+    const rows = money_movement_groups.slice(offset, offset + limit);
+    return {
+      returned: rows.length,
+      total_matching: money_movement_groups.length,
+      offset,
+      has_more: offset + rows.length < money_movement_groups.length,
+      server_knowledge,
+      money_movement_groups: rows,
     };
   }
 
@@ -943,6 +1048,14 @@ export class YnabService {
     return { updated: true, id: data.category_group.id, name: data.category_group.name };
   }
 
+  async createPayee(budgetId: string, name: string): Promise<unknown> {
+    this.#assertWritable();
+    const { payee } = await this.#send<{ payee: Payee }>('POST', `/plans/${enc(budgetId)}/payees`, {
+      payee: { name },
+    });
+    return { created: true, id: payee.id, name: payee.name };
+  }
+
   async updatePayee(budgetId: string, payeeId: string, name: string): Promise<unknown> {
     this.#assertWritable();
     const data = await this.#send<{ payee: Payee }>(
@@ -1029,6 +1142,47 @@ export class YnabService {
   }
 
   // ------------------------------------------------------------- internals
+
+  #formatAccount(a: Account, currency: CurrencyFormat) {
+    return {
+      id: a.id,
+      name: a.name,
+      type: a.type,
+      on_budget: a.on_budget,
+      closed: a.closed,
+      balance: this.money(a.balance, currency),
+      cleared_balance: this.money(a.cleared_balance, currency),
+      uncleared_balance: this.money(a.uncleared_balance, currency),
+      balance_milliunits: a.balance,
+      last_reconciled_at: a.last_reconciled_at,
+      transfer_payee_id: a.transfer_payee_id ?? undefined,
+    };
+  }
+
+  #formatCategory(c: Category, currency: CurrencyFormat) {
+    return {
+      id: c.id,
+      name: c.name,
+      budgeted: this.money(c.budgeted, currency),
+      activity: this.money(c.activity, currency),
+      balance: this.money(c.balance, currency),
+      balance_milliunits: c.balance,
+      ...(c.goal_type
+        ? {
+            goal: {
+              type: c.goal_type,
+              target: c.goal_target != null ? this.money(c.goal_target, currency) : undefined,
+              target_month: c.goal_target_month,
+              percent_complete: c.goal_percentage_complete,
+              under_funded:
+                c.goal_under_funded != null
+                  ? this.money(c.goal_under_funded, currency)
+                  : undefined,
+            },
+          }
+        : {}),
+    };
+  }
 
   #formatTxn(t: TransactionDetail, currency: CurrencyFormat) {
     return {
