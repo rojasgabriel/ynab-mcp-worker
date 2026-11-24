@@ -45,6 +45,13 @@ for (const [name, pick] of Object.entries(props)) {
 
 // Converting an existing transaction creates the counterpart, so warn about an already-imported duplicate.
 assert.match(tool('update_transaction').description, /already imported/);
+for (const [create, list] of [
+  ['create_transaction', 'list_transactions'],
+  ['create_scheduled_transaction', 'list_scheduled_transactions'],
+]) {
+  assert.match(tool(create).description, new RegExp(`check ${list}.*before retrying`));
+  assert.equal(tool(create).annotations.idempotentHint, false);
+}
 // Deleting one side of a transfer deletes both.
 assert.match(tool('delete_transaction').description, /transfer deletes both/);
 // The update tools have no account_id of their own, so their descriptions must not tell the model to set one.

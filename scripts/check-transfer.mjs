@@ -13,17 +13,26 @@ const TXNS = [
 ];
 
 let calls;
+let loseCreateResponse = false;
+const postedTransfers = [];
+const scheduled = { id: 's1', account_id: 'chk', category_id: null, date_first: '2026-09-30', date_next: '2026-10-30', frequency: 'monthly', amount: -2000 };
 globalThis.fetch = async (url, init = {}) => {
   const path = new URL(url).pathname.replace('/v1/plans/b', '');
   const body = init.body ? JSON.parse(init.body) : undefined;
   calls.push({ method: init.method, path, body });
   const echo = (t) => ({ id: 't', date: '2026-09-30', amount: 0, cleared: 'uncleared', approved: true,
     account_name: 'x', deleted: false, ...t, transfer_account_id: t.payee_id?.slice(3), transfer_transaction_id: 'tt' });
+  if (init.method === 'POST' && body?.transaction?.payee_id) {
+    postedTransfers.push(body.transaction);
+    if (loseCreateResponse) throw new Error('response lost after saving');
+  }
   const data =
     path === '/v1/plans' ? { plans: [] }
     : path === '/accounts' ? { accounts: ACCOUNTS }
     : path === '/transactions' && init.method === 'GET' ? { transactions: TXNS }
     : path.startsWith('/transactions/') && init.method === 'GET' ? { transaction: TXNS.find((t) => path.endsWith(t.id)) }
+    : path === '/scheduled_transactions/s1' && init.method === 'GET' ? { scheduled_transaction: scheduled }
+    : body?.scheduled_transaction ? { scheduled_transaction: { ...scheduled, ...echo(body.scheduled_transaction) } }
     : body?.transaction ? { transaction: echo(body.transaction) }
     : body?.transactions ? { transactions: body.transactions.map(echo) }
     : assert.fail(`unexpected ${init.method} ${path}`);
@@ -43,6 +52,19 @@ assert.equal(sent.payee_name, undefined);
 assert.equal(sent.category_id, null);
 assert.equal(created.transfer_account_id, 'chk');
 assert.equal(created.transfer_transaction_id, 'tt');
+
+// A transport failure can happen after YNAB saves the transfer. The worker
+// sends one POST per call, so a blind caller retry can save a second transfer.
+reset();
+postedTransfers.length = 0;
+const transfer = { accountId: 'sav', transferAccountId: 'chk', date: '2026-09-30', amount: -500 };
+loseCreateResponse = true;
+await assert.rejects(ynab.createTransaction('b', transfer), /response lost after saving/);
+assert.equal(writes().length, 1);
+assert.equal(postedTransfers.length, 1);
+loseCreateResponse = false;
+await ynab.createTransaction('b', transfer);
+assert.deepEqual(postedTransfers, [postedTransfers[0], postedTransfers[0]]);
 
 // rejections, and none of them reach YNAB with a write
 reset();
@@ -73,5 +95,18 @@ assert.deepEqual(writes()[0].body.transactions, [
   { id: 't2', payee_id: 'tp-sav', category_id: null },
 ]);
 assert.equal(calls.filter((c) => c.method === 'GET' && c.path !== '/v1/plans').length, 2);
+
+// Scheduled transfers use the destination payee and update the same schedule.
+reset();
+await ynab.createScheduledTransaction('b', { accountId: 'chk', transferAccountId: 'sav', date: '2026-09-30', frequency: 'monthly', amountMilliunits: -2000 });
+assert.deepEqual(writes()[0].body.scheduled_transaction, {
+  account_id: 'chk', date: '2026-09-30', frequency: 'monthly', amount: -2000, payee_id: 'tp-sav', category_id: null,
+});
+reset();
+await ynab.updateScheduledTransaction('b', 's1', { transferAccountId: 'sav' });
+await ynab.updateScheduledTransaction('b', 's1', { transferAccountId: 'sav' });
+assert.deepEqual(writes(), Array.from({ length: 2 }, () => ({
+  method: 'PUT', path: '/scheduled_transactions/s1', body: { scheduled_transaction: { payee_id: 'tp-sav', category_id: null } },
+})));
 
 console.log('transfer checks passed');
