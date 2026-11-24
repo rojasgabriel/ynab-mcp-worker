@@ -378,7 +378,9 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
         '(a purchase), positive for money arriving (income, a refund). For example -42.50 for a $42.50 expense.' +
         TRANSFER_RULES +
         ' If the result is uncertain after a timeout or connection error, check list_transactions on the source ' +
-        'account before retrying. A second create can duplicate the transaction and both sides of a transfer.',
+        'account before retrying. Set since_date and until_date to the original transaction date. Use offset to ' +
+        'check subsequent pages while has_more is true. Retry only if you can confirm the original was not saved. ' +
+        'A second create can duplicate the transaction and both sides of a transfer.',
       inputSchema: {
         budget_id: budgetIdSchema,
         account_id: z.string().describe('Account the transaction belongs to. Get this from list_accounts.'),

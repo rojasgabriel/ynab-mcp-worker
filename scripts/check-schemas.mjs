@@ -52,6 +52,10 @@ for (const [create, list] of [
   assert.match(tool(create).description, new RegExp(`check ${list}.*before retrying`));
   assert.equal(tool(create).annotations.idempotentHint, false);
 }
+const createDescription = tool('create_transaction').description;
+assert.match(createDescription, /since_date and until_date to the original transaction date/);
+assert.match(createDescription, /offset.*while has_more is true/);
+assert.match(createDescription, /Retry only if you can confirm the original was not saved/);
 // Deleting one side of a transfer deletes both.
 assert.match(tool('delete_transaction').description, /transfer deletes both/);
 // The update tools have no account_id of their own, so their descriptions must not tell the model to set one.
