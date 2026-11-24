@@ -376,7 +376,11 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
       description:
         'Record a new transaction. Amounts are in plain currency: negative for money leaving the account ' +
         '(a purchase), positive for money arriving (income, a refund). For example -42.50 for a $42.50 expense.' +
-        TRANSFER_RULES,
+        TRANSFER_RULES +
+        ' If the result is uncertain after a timeout or connection error, check list_transactions on the source ' +
+        'account before retrying. Set since_date and until_date to the original transaction date. Use offset to ' +
+        'check subsequent pages while has_more is true. Retry only if you can confirm the original was not saved. ' +
+        'A second create can duplicate the transaction and both sides of a transfer.',
       inputSchema: {
         budget_id: budgetIdSchema,
         account_id: z.string().describe('Account the transaction belongs to. Get this from list_accounts.'),
@@ -546,7 +550,9 @@ export function registerTools(server: McpServer, ynab: YnabService, allowWrites:
       title: 'Create scheduled transaction',
       description:
         'Schedule a recurring or future-dated transaction. Amount is in plain currency (negative for spending).' +
-        TRANSFER_RULES,
+        TRANSFER_RULES +
+        ' If the result is uncertain after a timeout or connection error, check list_scheduled_transactions ' +
+        'before retrying. A second create can duplicate the scheduled transaction.',
       inputSchema: {
         budget_id: budgetIdSchema,
         account_id: z.string().describe('Account it belongs to. Get this from list_accounts.'),
